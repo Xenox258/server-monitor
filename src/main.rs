@@ -1,4 +1,4 @@
-use axum::{routing::get, Json, Router};
+use axum::{response::Html, routing::get, Json, Router};
 use serde::Serialize;
 use sysinfo::System;
 
@@ -26,9 +26,14 @@ async fn get_stats() -> Json<Stats> {
     })
 }
 
+async fn index() -> Html<&'static str> {
+    Html(include_str!("static/index.html"))
+}
 #[tokio::main]
 async fn main() {
-    let app = Router::new().route("/api/stats", get(get_stats));
+    let app = Router::new()
+    .route("/", get(index))
+    .route("/api/stats", get(get_stats));
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
     axum::serve(listener, app).await.unwrap();

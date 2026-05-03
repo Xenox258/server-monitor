@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RPI Monitor</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #111827;
+      color: #f9fafb;
+      margin: 0;
+      padding: 24px;
+    }
+
+    h1 {
+      margin-bottom: 24px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 16px;
+    }
+
+    .card {
+      background: #1f2937;
+      border-radius: 12px;
+      padding: 16px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+    }
+
+    .label {
+      font-size: 14px;
+      color: #9ca3af;
+      margin-bottom: 8px;
+    }
+
+    .value {
+      font-size: 28px;
+      font-weight: bold;
+    }
+  </style>
+</head>
+<body>
+  <h1>Stats Raspberry Pi</h1>
+
+  <div class="grid">
+    <div class="card">
+      <div class="label">Mémoire totale</div>
+      <div class="value" id="total_memory">-</div>
+    </div>
+
+    <div class="card">
+      <div class="label">Mémoire utilisée</div>
+      <div class="value" id="used_memory">-</div>
+    </div>
+
+    <div class="card">
+      <div class="label">Swap utilisé</div>
+      <div class="value" id="used_swap">-</div>
+    </div>
+
+    <div class="card">
+      <div class="label">CPU</div>
+      <div class="value" id="cpu_count">-</div>
+    </div>
+
+    <div class="card">
+      <div class="label">Uptime</div>
+      <div class="value" id="uptime">-</div>
+    </div>
+  </div>
+
+  <script>
+    function formatBytes(bytes) {
+      const units = ["B", "KB", "MB", "GB", "TB"];
+      let i = 0;
+      let value = bytes;
+
+      while (value >= 1024 && i < units.length - 1) {
+        value /= 1024;
+        i++;
+      }
+
+      return value.toFixed(2) + " " + units[i];
+    }
+
+    function formatUptime(seconds) {
+      const h = Math.floor(seconds / 3600);
+      const m = Math.floor((seconds % 3600) / 60);
+      const s = seconds % 60;
+      return `${h}h ${m}m ${s}s`;
+    }
+
+    async function loadStats() {
+      const response = await fetch("/api/stats");
+      const stats = await response.json();
+
+      document.getElementById("total_memory").textContent = formatBytes(stats.total_memory);
+      document.getElementById("used_memory").textContent = formatBytes(stats.used_memory);
+      document.getElementById("used_swap").textContent = formatBytes(stats.used_swap);
+      document.getElementById("cpu_count").textContent = stats.cpu_count;
+      document.getElementById("uptime").textContent = formatUptime(stats.uptime);
+    }
+
+    loadStats();
+    setInterval(loadStats, 2000);
+  </script>
+</body>
+</html>
