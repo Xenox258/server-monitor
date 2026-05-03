@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>RPI Monitor</title>
   <link rel="stylesheet" href="/static/style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
   <h1>RPI Monitor</h1>
@@ -44,6 +45,75 @@
       <div class="value" id="uptime">-</div>
       <div class="sub">Temps depuis le démarrage</div>
     </div>
+
+    <div class="charts-section">
+  <div class="card chart-card">
+    <div class="label">Historique CPU</div>
+    <canvas id="cpu_chart"></canvas>
+  </div>
+
+  <div class="card chart-card">
+    <div class="label">Historique RAM</div>
+    <canvas id="ram_chart"></canvas>
+  </div>
+
+  <div class="card chart-card">
+    <div class="label">Historique Disque</div>
+    <canvas id="disk_chart"></canvas>
+  </div>
+</div>
+
+<div class="grid">
+  <div class="card">
+    <div class="label">Température</div>
+    <div class="value" id="temperature_value">-</div>
+    <div class="sub" id="temperature_detail">Température max détectée</div>
+  </div>
+
+  <div class="card">
+    <div class="label">Débit réseau</div>
+    <div class="value" id="network_down">-</div>
+    <div class="sub" id="network_up">-</div>
+  </div>
+
+  <div class="card large">
+    <div class="label">Top processus CPU</div>
+    <div class="list" id="top_cpu_processes"></div>
+  </div>
+
+  <div class="card large">
+    <div class="label">Top processus RAM</div>
+    <div class="list" id="top_ram_processes"></div>
+  </div>
+</div>
+
+    <div class="full-width-section">
+  <div class="card large">
+    <div class="section-head">
+      <div>
+        <div class="label">Docker</div>
+        <div class="sub" id="docker_summary">Chargement des conteneurs...</div>
+      </div>
+    </div>
+
+    <div class="list" id="docker_containers">
+      <div class="muted">Chargement...</div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div class="label">I/O disque</div>
+  <div class="value" id="disk_read_speed">-</div>
+  <div class="sub" id="disk_write_speed">-</div>
+</div>
+
+<div class="card large">
+  <div class="label">Top processus I/O</div>
+  <div class="list" id="top_io_processes">
+    <div class="muted">Chargement...</div>
+  </div>
+</div>
 
     <div class="card large">
       <div class="label">Disques</div>

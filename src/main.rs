@@ -9,11 +9,34 @@ use sysinfo::{Components, Disks, Networks, System};
 use tokio::sync::RwLock;
 use tokio::time::interval;
 use tower_http::services::ServeDir;
+use bollard::Docker;
+use bollard::query_parameters::ListContainersOptions;
+
+#[derive(Clone, Serialize)]
+struct ContainerStat {
+    name: String,
+    status: String,
+    cpu_percent: f32,
+    mem_percent: f32,
+}
 
 #[derive(Clone)]
 struct AppState {
     internet_access: Arc<RwLock<bool>>,
     last_internet_check: Arc<RwLock<u64>>,
+    cpu_history: Arc<RwLock<Vec<f64>>>,
+    ram_history: Arc<RwLock<Vec<f64>>>,
+    disk_history: Arc<RwLock<Vec<f64>>>,
+    networks: Arc<RwLock<Networks>>,
+    docker: Docker,
+    docker_containers: Arc<RwLock<Vec<ContainerStat>>>,
+}
+
+#[derive(Serialize)]
+struct History {
+    cpu: Vec<f64>,
+    ram: Vec<f64>,
+    disk: Vec<f64>,
 }
 
 #[derive(Serialize)]
@@ -39,6 +62,40 @@ struct TempStat {
 }
 
 #[derive(Serialize)]
+struct NetworkSummary {
+    download_bps: u64,
+    upload_bps: u64,
+}
+
+#[derive(Serialize, Clone)]
+struct ProcessStat {
+    pid: String,
+    name: String,
+    cpu_usage: f32,
+    memory: u64,
+}
+
+#[derive(Serialize)]
+struct TemperatureSummary {
+    current: Option<f32>,
+    level: String,
+}
+
+#[derive(Serialize)]
+struct DiskIoSummary {
+    read_bytes: u64,
+    write_bytes: u64,
+}
+
+#[derive(Serialize, Clone)]
+struct ProcessIoStat {
+    pid: String,
+    name: String,
+    read_bytes: u64,
+    write_bytes: u64,
+}
+
+#[derive(Serialize)]
 struct Stats {
     total_memory: u64,
     used_memory: u64,
@@ -55,6 +112,14 @@ struct Stats {
     disks: Vec<DiskStat>,
     networks: Vec<NetworkStat>,
     temperatures: Vec<TempStat>,
+    history: History,
+    temperature_summary: TemperatureSummary,
+    network_summary: NetworkSummary,
+    top_processes_cpu: Vec<ProcessStat>,
+    top_processes_memory: Vec<ProcessStat>,
+    docker_containers: Vec<ContainerStat>,
+    disk_io_summary: DiskIoSummary,
+    top_processes_io: Vec<ProcessIoStat>,
 }
 
 async fn check_internet(client: &Client) -> bool {
@@ -65,6 +130,50 @@ async fn check_internet(client: &Client) -> bool {
     {
         Ok(response) => response.status().is_success(),
         Err(_) => false,
+    }
+}
+
+async fn docker_monitor_task(state: AppState) {
+    let mut ticker = interval(Duration::from_secs(10));
+
+    loop {
+        ticker.tick().await;
+
+        let mut stats_list = Vec::new();
+
+        let result = state
+            .docker
+            .list_containers(Some(ListContainersOptions {
+                all: true,
+                ..Default::default()
+            }))
+            .await;
+
+        if let Ok(containers) = result {
+            for c in containers {
+                let name = c
+                    .names
+                    .as_ref()
+                    .and_then(|names| names.first())
+                    .map(|n| n.trim_start_matches('/').to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+
+                let status = c
+                    .state
+                    .as_ref()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+
+                stats_list.push(ContainerStat {
+                    name,
+                    status,
+                    cpu_percent: 0.0,
+                    mem_percent: 0.0,
+                });
+            }
+        }
+
+        *state.docker_containers.write().await = stats_list;
     }
 }
 
@@ -99,6 +208,8 @@ async fn internet_monitor_task(state: AppState) {
 }
 
 async fn get_stats(State(state): State<AppState>) -> Json<Stats> {
+    use std::cmp::Ordering;
+
     let mut sys = System::new_all();
     sys.refresh_all();
     sys.refresh_cpu_usage();
@@ -143,22 +254,121 @@ async fn get_stats(State(state): State<AppState>) -> Json<Stats> {
         0.0
     };
 
-    let networks = Networks::new_with_refreshed_list()
+    let cpu_usage = sys.global_cpu_usage() as f64;
+
+    {
+        let mut cpu_history = state.cpu_history.write().await;
+        cpu_history.push(cpu_usage);
+        if cpu_history.len() > 60 {
+            cpu_history.remove(0);
+        }
+    }
+
+    {
+        let mut ram_history = state.ram_history.write().await;
+        ram_history.push(memory_percent);
+        if ram_history.len() > 60 {
+            ram_history.remove(0);
+        }
+    }
+
+    {
+        let mut disk_history = state.disk_history.write().await;
+        disk_history.push(disk_percent);
+        if disk_history.len() > 60 {
+            disk_history.remove(0);
+        }
+    }
+
+    let history = History {
+        cpu: state.cpu_history.read().await.clone(),
+        ram: state.ram_history.read().await.clone(),
+        disk: state.disk_history.read().await.clone(),
+    };
+
+    let (networks, network_summary) = {
+        let mut networks_guard = state.networks.write().await;
+        networks_guard.refresh(true);
+
+        let mut total_download_since_refresh = 0u64;
+        let mut total_upload_since_refresh = 0u64;
+
+        let networks: Vec<NetworkStat> = networks_guard
+            .iter()
+            .map(|(name, data)| {
+                total_download_since_refresh += data.received();
+                total_upload_since_refresh += data.transmitted();
+
+                NetworkStat {
+                    name: name.to_string(),
+                    total_received: data.total_received(),
+                    total_transmitted: data.total_transmitted(),
+                }
+            })
+            .collect();
+
+        let network_summary = NetworkSummary {
+            download_bps: total_download_since_refresh / 2,
+            upload_bps: total_upload_since_refresh / 2,
+        };
+
+        (networks, network_summary)
+    };
+
+    let temperatures: Vec<TempStat> = Components::new_with_refreshed_list()
         .iter()
-        .map(|(name, data)| NetworkStat {
-            name: name.to_string(),
-            total_received: data.total_received(),
-            total_transmitted: data.total_transmitted(),
+        .map(|component| {
+            let raw = component.temperature();
+            // component.temperature() returns Option<f32>; filter out NaN values
+            let temperature = raw.filter(|v| !v.is_nan());
+
+            TempStat {
+                label: component.label().to_string(),
+                temperature,
+            }
         })
         .collect();
 
-    let temperatures = Components::new_with_refreshed_list()
+    let max_temp = temperatures
         .iter()
-        .map(|component| TempStat {
-            label: component.label().to_string(),
-            temperature: component.temperature(),
+        .filter_map(|t| t.temperature)
+        .max_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+
+    let temperature_summary = TemperatureSummary {
+        current: max_temp,
+        level: match max_temp {
+            Some(t) if t >= 80.0 => "critical".to_string(),
+            Some(t) if t >= 70.0 => "warning".to_string(),
+            Some(_) => "normal".to_string(),
+            None => "unknown".to_string(),
+        },
+    };
+
+    let _process_count = sys.processes().len();
+    let cpu_core_count = sys.cpus().len().max(1) as f32;
+
+    let processes: Vec<ProcessStat> = sys
+        .processes()
+        .iter()
+        .map(|(pid, process)| ProcessStat {
+            pid: pid.to_string(),
+            name: process.name().to_string_lossy().to_string(),
+            cpu_usage: process.cpu_usage() / cpu_core_count,
+            memory: process.memory(),
         })
         .collect();
+
+    let mut top_processes_cpu = processes.clone();
+    top_processes_cpu.sort_by(|a, b| {
+        b.cpu_usage
+            .partial_cmp(&a.cpu_usage)
+            .unwrap_or(Ordering::Equal)
+    });
+    top_processes_cpu.truncate(5);
+
+    let mut top_processes_memory = processes;
+    top_processes_memory.sort_by(|a, b| b.memory.cmp(&a.memory));
+    top_processes_memory.truncate(5);
 
     let internet_access = *state.internet_access.read().await;
     let last_internet_check = *state.last_internet_check.read().await;
@@ -168,7 +378,39 @@ async fn get_stats(State(state): State<AppState>) -> Json<Stats> {
     } else {
         "Pas d'accès Internet".to_string()
     };
+    let docker_containers = state.docker_containers.read().await.clone();
 
+    let mut total_read_bytes = 0u64;
+    let mut total_write_bytes = 0u64;
+
+    let mut top_processes_io: Vec<ProcessIoStat> = sys
+        .processes()
+        .iter()
+        .map(|(pid, process)| {
+            let usage = process.disk_usage();
+            total_read_bytes += usage.read_bytes;
+            total_write_bytes += usage.written_bytes;
+
+            ProcessIoStat {
+                pid: pid.to_string(),
+                name: process.name().to_string_lossy().to_string(),
+                read_bytes: usage.read_bytes / 2,
+                write_bytes: usage.written_bytes / 2,
+            }
+        })
+        .collect();
+
+    top_processes_io.sort_by(|a, b| {
+        let a_total = a.read_bytes + a.write_bytes;
+        let b_total = b.read_bytes + b.write_bytes;
+        b_total.cmp(&a_total)
+    });
+    top_processes_io.truncate(5);
+
+    let disk_io_summary = DiskIoSummary {
+        read_bytes: total_read_bytes / 2,
+        write_bytes: total_write_bytes / 2,
+    };
     Json(Stats {
         total_memory,
         used_memory,
@@ -176,7 +418,7 @@ async fn get_stats(State(state): State<AppState>) -> Json<Stats> {
         total_swap: sys.total_swap(),
         used_swap: sys.used_swap(),
         cpu_count: sys.cpus().len(),
-        cpu_usage: sys.global_cpu_usage(),
+        cpu_usage: cpu_usage as f32,
         uptime: System::uptime(),
         disk_percent,
         connection_status,
@@ -185,6 +427,14 @@ async fn get_stats(State(state): State<AppState>) -> Json<Stats> {
         disks,
         networks,
         temperatures,
+        history,
+        temperature_summary,
+        network_summary,
+        top_processes_cpu,
+        top_processes_memory,
+        docker_containers,
+        disk_io_summary,
+        top_processes_io,
     })
 }
 
@@ -194,12 +444,20 @@ async fn index() -> Html<&'static str> {
 
 #[tokio::main]
 async fn main() {
+    let docker = Docker::connect_with_local_defaults().expect("Docker socket non trouvé");
     let state = AppState {
-        internet_access: Arc::new(RwLock::new(false)),
-        last_internet_check: Arc::new(RwLock::new(0)),
+    internet_access: Arc::new(RwLock::new(false)),
+    last_internet_check: Arc::new(RwLock::new(0)),
+    cpu_history: Arc::new(RwLock::new(Vec::new())),
+    ram_history: Arc::new(RwLock::new(Vec::new())),
+    disk_history: Arc::new(RwLock::new(Vec::new())),
+    networks: Arc::new(RwLock::new(Networks::new_with_refreshed_list())),
+    docker,
+    docker_containers: Arc::new(RwLock::new(Vec::new())),
     };
 
     tokio::spawn(internet_monitor_task(state.clone()));
+    tokio::spawn(docker_monitor_task(state.clone()));
 
     let app = Router::new()
         .route("/", get(index))
