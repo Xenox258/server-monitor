@@ -1,4 +1,6 @@
-use axum::{extract::State, response::Html, routing::get, Json, Router};
+use axum::{extract::State, routing::get, Json, Router};
+use bollard::query_parameters::ListContainersOptions;
+use bollard::Docker;
 use reqwest::Client;
 use serde::Serialize;
 use std::{
@@ -8,9 +10,9 @@ use std::{
 use sysinfo::{Components, Disks, Networks, System};
 use tokio::sync::RwLock;
 use tokio::time::interval;
-use tower_http::services::ServeDir;
-use bollard::Docker;
-use bollard::query_parameters::ListContainersOptions;
+use tower_http::cors::{Any, CorsLayer};
+
+const HISTORY_LEN: usize = 60;
 
 #[derive(Clone, Serialize)]
 struct ContainerStat {
@@ -109,6 +111,7 @@ struct Stats {
     connection_status: String,
     internet_access: bool,
     last_internet_check: u64,
+    last_update: u64,
     disks: Vec<DiskStat>,
     networks: Vec<NetworkStat>,
     temperatures: Vec<TempStat>,
@@ -130,6 +133,21 @@ async fn check_internet(client: &Client) -> bool {
     {
         Ok(response) => response.status().is_success(),
         Err(_) => false,
+    }
+}
+
+fn percent_u64(used: u64, total: u64) -> f64 {
+    if total > 0 {
+        (used as f64 / total as f64) * 100.0
+    } else {
+        0.0
+    }
+}
+
+fn push_history(history: &mut Vec<f64>, value: f64) {
+    history.push(value);
+    if history.len() > HISTORY_LEN {
+        history.remove(0);
     }
 }
 
@@ -216,11 +234,7 @@ async fn get_stats(State(state): State<AppState>) -> Json<Stats> {
 
     let total_memory = sys.total_memory();
     let used_memory = sys.used_memory();
-    let memory_percent = if total_memory > 0 {
-        (used_memory as f64 / total_memory as f64) * 100.0
-    } else {
-        0.0
-    };
+    let memory_percent = percent_u64(used_memory, total_memory);
 
     let disks: Vec<DiskStat> = Disks::new_with_refreshed_list()
         .list()
@@ -229,11 +243,7 @@ async fn get_stats(State(state): State<AppState>) -> Json<Stats> {
             let total_space = disk.total_space();
             let available_space = disk.available_space();
             let used_space = total_space.saturating_sub(available_space);
-            let used_percent = if total_space > 0 {
-                (used_space as f64 / total_space as f64) * 100.0
-            } else {
-                0.0
-            };
+            let used_percent = percent_u64(used_space, total_space);
 
             DiskStat {
                 name: disk.name().to_string_lossy().to_string(),
@@ -248,36 +258,23 @@ async fn get_stats(State(state): State<AppState>) -> Json<Stats> {
     let total_disk_space: u64 = disks.iter().map(|d| d.total_space).sum();
     let total_used_disk_space: u64 = disks.iter().map(|d| d.used_space).sum();
 
-    let disk_percent = if total_disk_space > 0 {
-        (total_used_disk_space as f64 / total_disk_space as f64) * 100.0
-    } else {
-        0.0
-    };
+    let disk_percent = percent_u64(total_used_disk_space, total_disk_space);
 
     let cpu_usage = sys.global_cpu_usage() as f64;
 
     {
         let mut cpu_history = state.cpu_history.write().await;
-        cpu_history.push(cpu_usage);
-        if cpu_history.len() > 60 {
-            cpu_history.remove(0);
-        }
+        push_history(&mut cpu_history, cpu_usage);
     }
 
     {
         let mut ram_history = state.ram_history.write().await;
-        ram_history.push(memory_percent);
-        if ram_history.len() > 60 {
-            ram_history.remove(0);
-        }
+        push_history(&mut ram_history, memory_percent);
     }
 
     {
         let mut disk_history = state.disk_history.write().await;
-        disk_history.push(disk_percent);
-        if disk_history.len() > 60 {
-            disk_history.remove(0);
-        }
+        push_history(&mut disk_history, disk_percent);
     }
 
     let history = History {
@@ -372,6 +369,10 @@ async fn get_stats(State(state): State<AppState>) -> Json<Stats> {
 
     let internet_access = *state.internet_access.read().await;
     let last_internet_check = *state.last_internet_check.read().await;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
 
     let connection_status = if internet_access {
         "Internet OK".to_string()
@@ -422,8 +423,9 @@ async fn get_stats(State(state): State<AppState>) -> Json<Stats> {
         uptime: System::uptime(),
         disk_percent,
         connection_status,
-        internet_access,
-        last_internet_check,
+    internet_access,
+    last_internet_check,
+    last_update: now,
         disks,
         networks,
         temperatures,
@@ -438,32 +440,33 @@ async fn get_stats(State(state): State<AppState>) -> Json<Stats> {
     })
 }
 
-async fn index() -> Html<&'static str> {
-    Html(include_str!("static/index.html"))
-}
-
 #[tokio::main]
 async fn main() {
     let docker = Docker::connect_with_local_defaults().expect("Docker socket non trouvé");
     let state = AppState {
-    internet_access: Arc::new(RwLock::new(false)),
-    last_internet_check: Arc::new(RwLock::new(0)),
-    cpu_history: Arc::new(RwLock::new(Vec::new())),
-    ram_history: Arc::new(RwLock::new(Vec::new())),
-    disk_history: Arc::new(RwLock::new(Vec::new())),
-    networks: Arc::new(RwLock::new(Networks::new_with_refreshed_list())),
-    docker,
-    docker_containers: Arc::new(RwLock::new(Vec::new())),
+        internet_access: Arc::new(RwLock::new(false)),
+        last_internet_check: Arc::new(RwLock::new(0)),
+        cpu_history: Arc::new(RwLock::new(Vec::new())),
+        ram_history: Arc::new(RwLock::new(Vec::new())),
+        disk_history: Arc::new(RwLock::new(Vec::new())),
+        networks: Arc::new(RwLock::new(Networks::new_with_refreshed_list())),
+        docker,
+        docker_containers: Arc::new(RwLock::new(Vec::new())),
     };
 
     tokio::spawn(internet_monitor_task(state.clone()));
     tokio::spawn(docker_monitor_task(state.clone()));
 
     let app = Router::new()
-        .route("/", get(index))
         .route("/api/stats", get(get_stats))
-        .nest_service("/static", ServeDir::new("src/static"))
-        .with_state(state);
+        .with_state(state)
+        // Add a permissive CORS layer for local development (Vite dev server)
+        .layer(
+            CorsLayer::new()
+                .allow_methods(Any)
+                .allow_headers(Any)
+                .allow_origin(Any),
+        );
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000")
         .await
