@@ -4,108 +4,64 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>RPI Monitor</title>
-  <style>
-    body {
-      font-family: Arial, sans-serif;
-      background: #111827;
-      color: #f9fafb;
-      margin: 0;
-      padding: 24px;
-    }
-
-    h1 {
-      margin-bottom: 24px;
-    }
-
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-      gap: 16px;
-    }
-
-    .card {
-      background: #1f2937;
-      border-radius: 12px;
-      padding: 16px;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.25);
-    }
-
-    .label {
-      font-size: 14px;
-      color: #9ca3af;
-      margin-bottom: 8px;
-    }
-
-    .value {
-      font-size: 28px;
-      font-weight: bold;
-    }
-  </style>
+  <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
-  <h1>Stats Raspberry Pi</h1>
+  <h1>RPI Monitor</h1>
+  <p class="subtitle">Dashboard système local, mise à jour automatique toutes les 2 secondes.</p>
 
   <div class="grid">
     <div class="card">
-      <div class="label">Mémoire totale</div>
-      <div class="value" id="total_memory">-</div>
+      <div class="label">CPU utilisé</div>
+      <div class="value" id="cpu_usage">-</div>
+      <div class="sub" id="cpu_detail">Usage global processeur</div>
+      <div class="bar"><div class="bar-fill" id="cpu_bar"></div></div>
     </div>
 
     <div class="card">
-      <div class="label">Mémoire utilisée</div>
-      <div class="value" id="used_memory">-</div>
+      <div class="label">RAM utilisée</div>
+      <div class="value" id="ram_percent">-</div>
+      <div class="sub" id="ram_detail">-</div>
+      <div class="bar"><div class="bar-fill" id="ram_bar"></div></div>
     </div>
 
     <div class="card">
-      <div class="label">Swap utilisé</div>
-      <div class="value" id="used_swap">-</div>
+      <div class="label">Disque utilisé</div>
+      <div class="value" id="disk_percent">-</div>
+      <div class="sub" id="disk_detail">Occupation moyenne</div>
+      <div class="bar"><div class="bar-fill" id="disk_bar"></div></div>
     </div>
 
     <div class="card">
-      <div class="label">CPU</div>
-      <div class="value" id="cpu_count">-</div>
+      <div class="label">Connexion</div>
+      <div class="value" id="connection_status">-</div>
+      <div class="sub" id="connection_detail">État réseau</div>
     </div>
 
     <div class="card">
       <div class="label">Uptime</div>
       <div class="value" id="uptime">-</div>
+      <div class="sub">Temps depuis le démarrage</div>
+    </div>
+
+    <div class="card large">
+      <div class="label">Disques</div>
+      <div class="list" id="disks"><div class="muted">Chargement...</div></div>
+    </div>
+
+    <div class="card large">
+      <div class="label">Réseau</div>
+      <div class="list" id="networks"><div class="muted">Chargement...</div></div>
+    </div>
+
+    <div class="card large">
+      <div class="label">Températures</div>
+      <div class="list" id="temperatures"><div class="muted">Chargement...</div></div>
     </div>
   </div>
 
-  <script>
-    function formatBytes(bytes) {
-      const units = ["B", "KB", "MB", "GB", "TB"];
-      let i = 0;
-      let value = bytes;
+  <div class="status" id="status">Chargement des données...</div>
 
-      while (value >= 1024 && i < units.length - 1) {
-        value /= 1024;
-        i++;
-      }
-
-      return value.toFixed(2) + " " + units[i];
-    }
-
-    function formatUptime(seconds) {
-      const h = Math.floor(seconds / 3600);
-      const m = Math.floor((seconds % 3600) / 60);
-      const s = seconds % 60;
-      return `${h}h ${m}m ${s}s`;
-    }
-
-    async function loadStats() {
-      const response = await fetch("/api/stats");
-      const stats = await response.json();
-
-      document.getElementById("total_memory").textContent = formatBytes(stats.total_memory);
-      document.getElementById("used_memory").textContent = formatBytes(stats.used_memory);
-      document.getElementById("used_swap").textContent = formatBytes(stats.used_swap);
-      document.getElementById("cpu_count").textContent = stats.cpu_count;
-      document.getElementById("uptime").textContent = formatUptime(stats.uptime);
-    }
-
-    loadStats();
-    setInterval(loadStats, 2000);
-  </script>
+  <script src="/static/app.js"></script>
 </body>
 </html>
