@@ -1,7 +1,20 @@
-use axum::{response::Html, routing::get, Json, Router};
+use axum::{extract::State, response::Html, routing::get, Json, Router};
+use reqwest::Client;
 use serde::Serialize;
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use sysinfo::{Components, Disks, Networks, System};
+use tokio::sync::RwLock;
+use tokio::time::interval;
 use tower_http::services::ServeDir;
+
+#[derive(Clone)]
+struct AppState {
+    internet_access: Arc<RwLock<bool>>,
+    last_internet_check: Arc<RwLock<u64>>,
+}
 
 #[derive(Serialize)]
 struct DiskStat {
@@ -38,12 +51,54 @@ struct Stats {
     disk_percent: f64,
     connection_status: String,
     internet_access: bool,
+    last_internet_check: u64,
     disks: Vec<DiskStat>,
     networks: Vec<NetworkStat>,
     temperatures: Vec<TempStat>,
 }
 
-async fn get_stats() -> Json<Stats> {
+async fn check_internet(client: &Client) -> bool {
+    match client
+        .get("https://clients3.google.com/generate_204")
+        .send()
+        .await
+    {
+        Ok(response) => response.status().is_success(),
+        Err(_) => false,
+    }
+}
+
+async fn internet_monitor_task(state: AppState) {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(2))
+        .connect_timeout(Duration::from_secs(1))
+        .build()
+        .unwrap();
+
+    let mut ticker = interval(Duration::from_secs(30));
+
+    loop {
+        ticker.tick().await;
+
+        let is_online = check_internet(&client).await;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        {
+            let mut internet_access = state.internet_access.write().await;
+            *internet_access = is_online;
+        }
+
+        {
+            let mut last_check = state.last_internet_check.write().await;
+            *last_check = now;
+        }
+    }
+}
+
+async fn get_stats(State(state): State<AppState>) -> Json<Stats> {
     let mut sys = System::new_all();
     sys.refresh_all();
     sys.refresh_cpu_usage();
@@ -88,9 +143,7 @@ async fn get_stats() -> Json<Stats> {
         0.0
     };
 
-    let networks_map = Networks::new_with_refreshed_list();
-
-    let networks: Vec<NetworkStat> = networks_map
+    let networks = Networks::new_with_refreshed_list()
         .iter()
         .map(|(name, data)| NetworkStat {
             name: name.to_string(),
@@ -99,17 +152,6 @@ async fn get_stats() -> Json<Stats> {
         })
         .collect();
 
-    let internet_access = match reqwest::get("https://clients3.google.com/generate_204").await {
-    Ok(response) => response.status().is_success(),
-    Err(_) => false,
-    };
-
-    let connection_status = if internet_access {
-        "Internet OK".to_string()
-    } else {
-        "Pas d'accès Internet".to_string()
-    };
-
     let temperatures = Components::new_with_refreshed_list()
         .iter()
         .map(|component| TempStat {
@@ -117,6 +159,15 @@ async fn get_stats() -> Json<Stats> {
             temperature: component.temperature(),
         })
         .collect();
+
+    let internet_access = *state.internet_access.read().await;
+    let last_internet_check = *state.last_internet_check.read().await;
+
+    let connection_status = if internet_access {
+        "Internet OK".to_string()
+    } else {
+        "Pas d'accès Internet".to_string()
+    };
 
     Json(Stats {
         total_memory,
@@ -130,6 +181,7 @@ async fn get_stats() -> Json<Stats> {
         disk_percent,
         connection_status,
         internet_access,
+        last_internet_check,
         disks,
         networks,
         temperatures,
@@ -142,11 +194,22 @@ async fn index() -> Html<&'static str> {
 
 #[tokio::main]
 async fn main() {
+    let state = AppState {
+        internet_access: Arc::new(RwLock::new(false)),
+        last_internet_check: Arc::new(RwLock::new(0)),
+    };
+
+    tokio::spawn(internet_monitor_task(state.clone()));
+
     let app = Router::new()
         .route("/", get(index))
         .route("/api/stats", get(get_stats))
-        .nest_service("/static", ServeDir::new("src/static"));
+        .nest_service("/static", ServeDir::new("src/static"))
+        .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000")
+        .await
+        .unwrap();
+
     axum::serve(listener, app).await.unwrap();
 }

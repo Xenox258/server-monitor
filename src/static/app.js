@@ -84,6 +84,27 @@ function renderTemperatures(temperatures) {
   `).join("");
 }
 
+function formatTimeAgo(unixSeconds) {
+  if (!unixSeconds || unixSeconds <= 0) {
+    return "Dernier test : jamais";
+  }
+
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const diff = Math.max(0, nowSeconds - unixSeconds);
+
+  if (diff < 60) {
+    return `Dernier test : il y a ${diff} s`;
+  }
+
+  const minutes = Math.floor(diff / 60);
+  if (minutes < 60) {
+    return `Dernier test : il y a ${minutes} min`;
+  }
+
+  const hours = Math.floor(diff / 3600);
+  return `Dernier test : il y a ${hours} h`;
+}
+
 async function loadStats() {
   try {
     const response = await fetch("/api/stats");
@@ -103,9 +124,10 @@ async function loadStats() {
     document.getElementById("disk_bar").style.width = `${Number(stats.disk_percent) || 0}%`;
 
     document.getElementById("connection_status").textContent = stats.connection_status;
-document.getElementById("connection_detail").textContent =
-  stats.internet_access ? "Test HTTP sortant réussi" : "Aucun accès Internet détecté";
-
+    document.getElementById("connection_detail").textContent =
+    stats.internet_access ? "Test HTTP sortant réussi" : "Aucun accès Internet détecté";
+    document.getElementById("internet_last_check").textContent =
+    formatTimeAgo(stats.last_internet_check);
     document.getElementById("uptime").textContent = formatUptime(stats.uptime);
 
     renderDisks(safeArray(stats.disks));
@@ -121,6 +143,8 @@ document.getElementById("connection_detail").textContent =
     status.classList.add("error");
   }
 }
+
+
 
 loadStats();
 setInterval(loadStats, 2000);
