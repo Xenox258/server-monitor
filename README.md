@@ -2,7 +2,7 @@
 
 Server Monitor is a small system dashboard written in Rust that collects hardware and OS metrics (CPU, RAM, disk, network, temperatures, processes, simple Docker container info) and exposes them over a tiny HTTP API consumed by a React/Vite frontend.
 
-[Test it out here !](stats.xenox.fr)
+[Test it out here !](https://stats.xenox.fr)
 
 This repository contains two main pieces:
 - `backend/` — Rust + axum server which gathers metrics (via `sysinfo`) and exposes `/api/stats`.
