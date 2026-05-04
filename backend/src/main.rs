@@ -1,3 +1,11 @@
+// Simple system monitor HTTP server using axum.
+//
+// The server collects system metrics via `sysinfo`, optionally inspects
+// Docker containers via `bollard`, and exposes a single JSON endpoint
+// (`/api/stats`) for frontend consumption. Background tasks periodically
+// check Internet connectivity and (optionally) refresh Docker container
+// metadata. Shared application state is stored in an `AppState` and
+// synchronized with async RwLocks.
 use axum::{extract::State, routing::get, Json, Router};
 use bollard::query_parameters::ListContainersOptions;
 use bollard::Docker;
@@ -14,6 +22,7 @@ use tower_http::cors::{Any, CorsLayer};
 
 const HISTORY_LEN: usize = 60;
 
+// Summary information for a Docker container used by the frontend.
 #[derive(Clone, Serialize)]
 struct ContainerStat {
     name: String,
@@ -22,6 +31,9 @@ struct ContainerStat {
     mem_percent: f32,
 }
 
+// Global application state shared between request handlers and background
+// tasks. Most fields are wrapped in `Arc<RwLock<...>>` to allow concurrent
+// async reads and writes without blocking the runtime.
 #[derive(Clone)]
 struct AppState {
     internet_access: Arc<RwLock<bool>>,
@@ -34,6 +46,8 @@ struct AppState {
     docker_containers: Arc<RwLock<Vec<ContainerStat>>>,
 }
 
+// Time series history payload sent to the frontend. Each vector contains up
+// to `HISTORY_LEN` samples collected over time.
 #[derive(Serialize)]
 struct History {
     cpu: Vec<f64>,
@@ -41,6 +55,7 @@ struct History {
     disk: Vec<f64>,
 }
 
+// Per-disk summary exposed to the frontend.
 #[derive(Serialize)]
 struct DiskStat {
     name: String,
@@ -50,6 +65,7 @@ struct DiskStat {
     used_percent: f64,
 }
 
+// Per-network interface counters.
 #[derive(Serialize)]
 struct NetworkStat {
     name: String,
@@ -57,18 +73,21 @@ struct NetworkStat {
     total_transmitted: u64,
 }
 
+// Temperature reading for a sensor/component (may be None if not available).
 #[derive(Serialize)]
 struct TempStat {
     label: String,
     temperature: Option<f32>,
 }
 
+// Aggregated network summary values (rough instantaneous bytes per second).
 #[derive(Serialize)]
 struct NetworkSummary {
     download_bps: u64,
     upload_bps: u64,
 }
 
+// Lightweight process summary for CPU/memory leaderboards.
 #[derive(Serialize, Clone)]
 struct ProcessStat {
     pid: String,
@@ -77,18 +96,21 @@ struct ProcessStat {
     memory: u64,
 }
 
+// Single value summary derived from available temperature sensors.
 #[derive(Serialize)]
 struct TemperatureSummary {
     current: Option<f32>,
     level: String,
 }
 
+// Aggregated disk I/O counters for read/write bytes.
 #[derive(Serialize)]
 struct DiskIoSummary {
     read_bytes: u64,
     write_bytes: u64,
 }
 
+// Per-process I/O activity used to show top I/O consumers.
 #[derive(Serialize, Clone)]
 struct ProcessIoStat {
     pid: String,
@@ -97,6 +119,9 @@ struct ProcessIoStat {
     write_bytes: u64,
 }
 
+// Full payload returned by the `/api/stats` endpoint. This struct captures
+// the snapshot of system state at the time of the request and is serialized
+// to JSON for the frontend.
 #[derive(Serialize)]
 struct Stats {
     total_memory: u64,
@@ -125,6 +150,9 @@ struct Stats {
     top_processes_io: Vec<ProcessIoStat>,
 }
 
+// Perform a lightweight HTTP request to a well-known endpoint that returns
+// HTTP 204 when reachable. This provides a cheap check for outbound Internet
+// connectivity. The function returns true on success, false otherwise.
 async fn check_internet(client: &Client) -> bool {
     match client
         .get("https://clients3.google.com/generate_204")
@@ -136,6 +164,8 @@ async fn check_internet(client: &Client) -> bool {
     }
 }
 
+// Safe percent calculation for u64 values. Returns 0.0 when total is zero
+// to avoid division by zero.
 fn percent_u64(used: u64, total: u64) -> f64 {
     if total > 0 {
         (used as f64 / total as f64) * 100.0
@@ -144,6 +174,8 @@ fn percent_u64(used: u64, total: u64) -> f64 {
     }
 }
 
+// Append a value to a fixed-length circular history buffer. When the buffer
+// exceeds HISTORY_LEN the oldest element is removed.
 fn push_history(history: &mut Vec<f64>, value: f64) {
     history.push(value);
     if history.len() > HISTORY_LEN {
@@ -151,6 +183,10 @@ fn push_history(history: &mut Vec<f64>, value: f64) {
     }
 }
 
+// Background task that periodically queries the Docker daemon for a list
+// of containers. The task updates `state.docker_containers` with a simple
+// summary. For now CPU/memory percentages are placeholders (0.0) — this
+// can be extended to query more detailed stats if needed.
 async fn docker_monitor_task(state: AppState) {
     let mut ticker = interval(Duration::from_secs(10));
 
@@ -195,6 +231,9 @@ async fn docker_monitor_task(state: AppState) {
     }
 }
 
+// Background task that periodically checks outbound Internet connectivity
+// with a small timeout to avoid blocking. It updates both the boolean
+// `internet_access` flag and `last_internet_check` timestamp in shared state.
 async fn internet_monitor_task(state: AppState) {
     let client = Client::builder()
         .timeout(Duration::from_secs(2))
@@ -225,6 +264,11 @@ async fn internet_monitor_task(state: AppState) {
     }
 }
 
+// Handler that builds a snapshot of system metrics and returns them as JSON.
+// This function gathers memory/cpu/disk statistics, process leaderboards,
+// per-disk and network counters, temperature summaries, and an I/O summary.
+// The function also updates the in-memory histories used by the frontend
+// graphs.
 async fn get_stats(State(state): State<AppState>) -> Json<Stats> {
     use std::cmp::Ordering;
 
@@ -262,6 +306,7 @@ async fn get_stats(State(state): State<AppState>) -> Json<Stats> {
 
     let cpu_usage = sys.global_cpu_usage() as f64;
 
+    // update rolling histories used by the frontend charts
     {
         let mut cpu_history = state.cpu_history.write().await;
         push_history(&mut cpu_history, cpu_usage);
@@ -283,6 +328,7 @@ async fn get_stats(State(state): State<AppState>) -> Json<Stats> {
         disk: state.disk_history.read().await.clone(),
     };
 
+    // collect network counters and compute a simple per-interval throughput
     let (networks, network_summary) = {
         let mut networks_guard = state.networks.write().await;
         networks_guard.refresh(true);
@@ -305,6 +351,8 @@ async fn get_stats(State(state): State<AppState>) -> Json<Stats> {
             .collect();
 
         let network_summary = NetworkSummary {
+            // divide by 2 because frontend polls every ~2s; this is a
+            // lightweight approximation for bytes-per-second
             download_bps: total_download_since_refresh / 2,
             upload_bps: total_upload_since_refresh / 2,
         };
@@ -312,6 +360,7 @@ async fn get_stats(State(state): State<AppState>) -> Json<Stats> {
         (networks, network_summary)
     };
 
+    // read temperature components and compute a simple summary
     let temperatures: Vec<TempStat> = Components::new_with_refreshed_list()
         .iter()
         .map(|component| {
@@ -341,6 +390,7 @@ async fn get_stats(State(state): State<AppState>) -> Json<Stats> {
         },
     };
 
+    // build process lists and leaderboards
     let _process_count = sys.processes().len();
     let cpu_core_count = sys.cpus().len().max(1) as f32;
 
@@ -381,6 +431,7 @@ async fn get_stats(State(state): State<AppState>) -> Json<Stats> {
     };
     let docker_containers = state.docker_containers.read().await.clone();
 
+    // compute per-process I/O and an aggregated I/O summary
     let mut total_read_bytes = 0u64;
     let mut total_write_bytes = 0u64;
 
@@ -395,6 +446,8 @@ async fn get_stats(State(state): State<AppState>) -> Json<Stats> {
             ProcessIoStat {
                 pid: pid.to_string(),
                 name: process.name().to_string_lossy().to_string(),
+                // divide by 2 to approximate per-second values based on the
+                // frontend polling interval (2s)
                 read_bytes: usage.read_bytes / 2,
                 write_bytes: usage.written_bytes / 2,
             }
