@@ -22,6 +22,7 @@ use tokio::time::interval;
 use tower_http::cors::{Any, CorsLayer};
 
 const HISTORY_LEN: usize = 60;
+const TOP_PROCESS_LEN: usize = 3;
 
 // Summary information for a Docker container used by the frontend.
 #[derive(Clone, Serialize)]
@@ -460,11 +461,11 @@ async fn get_stats(State(state): State<AppState>) -> Json<Stats> {
             .partial_cmp(&a.cpu_usage)
             .unwrap_or(Ordering::Equal)
     });
-    top_processes_cpu.truncate(5);
+    top_processes_cpu.truncate(TOP_PROCESS_LEN);
 
     let mut top_processes_memory = std::mem::take(&mut processes);
     top_processes_memory.sort_by(|a, b| b.memory.cmp(&a.memory));
-    top_processes_memory.truncate(5);
+    top_processes_memory.truncate(TOP_PROCESS_LEN);
 
     let internet_access = *state.internet_access.read().await;
     let last_internet_check = *state.last_internet_check.read().await;
@@ -576,7 +577,7 @@ async fn get_stats(State(state): State<AppState>) -> Json<Stats> {
         let b_total = b.read_bytes + b.write_bytes;
         b_total.cmp(&a_total)
     });
-    top_processes_io.truncate(5);
+    top_processes_io.truncate(TOP_PROCESS_LEN);
     Json(Stats {
         total_memory,
         used_memory,
