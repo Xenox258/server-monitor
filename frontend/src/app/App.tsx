@@ -140,6 +140,39 @@ function normalizeContainerStatus(status: string) {
   return { label: status || "Unknown", className: "other" };
 }
 
+const SCALE_WINDOW_LEN = 20;
+
+function getScaleWindow(values: number[]) {
+  if (values.length < SCALE_WINDOW_LEN) return values;
+  return values.slice(-SCALE_WINDOW_LEN);
+}
+
+function getRecentScale(values: number[], options?: { minAtZero?: boolean; minRange?: number; maxCap?: number }) {
+  const recentValues = getScaleWindow(values).filter((value) => Number.isFinite(value));
+  if (recentValues.length === 0) {
+    return { min: options?.minAtZero ? 0 : undefined, max: options?.minRange ?? 1 };
+  }
+
+  const rawMin = Math.min(...recentValues);
+  const rawMax = Math.max(...recentValues);
+  const minRange = options?.minRange ?? 1;
+  const range = Math.max(rawMax - rawMin, minRange);
+  const padding = Math.max(range * 0.2, minRange * 0.2);
+
+  let min = options?.minAtZero ? 0 : Math.max(0, rawMin - padding);
+  let max = rawMax + padding;
+
+  if (max - min < minRange) {
+    max = min + minRange;
+  }
+
+  if (options?.maxCap !== undefined) {
+    max = Math.min(max, options.maxCap);
+  }
+
+  return { min, max };
+}
+
 export default function App() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [error, setError] = useState<string>("");
@@ -225,7 +258,8 @@ export default function App() {
   color: string,
   data: number[],
   labels: string[],
-  unit?: string
+  unit?: string,
+  scale?: { min?: number; max?: number }
 ) => {
   if (!ref.current) return null;
   const chartOptions: any = {
@@ -234,6 +268,8 @@ export default function App() {
       ...commonOptions.scales,
       y: {
         ...commonOptions.scales.y,
+        min: scale?.min ?? commonOptions.scales.y.min,
+        max: scale?.max,
         ticks: {
           ...((commonOptions.scales && (commonOptions.scales as any).y && (commonOptions.scales as any).y.ticks) || {}),
           callback: unit
@@ -281,8 +317,11 @@ export default function App() {
 const cpuLabels = stats.history.cpu.map((_, i) => String(i + 1));
 const ramLabels = stats.history.ram.map((_, i) => String(i + 1));
 
-cpuChart.current = makeChart(cpuChartRef, "#5eead4", stats.history.cpu, cpuLabels, "%");
-ramChart.current = makeChart(ramChartRef, "#60a5fa", stats.history.ram, ramLabels, "%");
+const cpuScale = getRecentScale(stats.history.cpu, { minAtZero: true, minRange: 8, maxCap: 100 });
+const ramScale = getRecentScale(stats.history.ram, { minRange: 8, maxCap: 100 });
+
+cpuChart.current = makeChart(cpuChartRef, "#5eead4", stats.history.cpu, cpuLabels, "%", cpuScale);
+ramChart.current = makeChart(ramChartRef, "#60a5fa", stats.history.ram, ramLabels, "%", ramScale);
 
 // Update IO histories (backend values are bytes per second; chart uses KB/s)
   const readB = stats.disk_io_summary.read_bytes || 0;
@@ -297,10 +336,12 @@ if (diskChartRef.current) {
   // clone commonOptions deeply to mutate safely
   const diskOptions: any = JSON.parse(JSON.stringify(commonOptions));
 
-  // determine max observed value across both series
-  const maxVal = Math.max(...(ioReadRef.current.length ? ioReadRef.current : [0]), ...(ioWriteRef.current.length ? ioWriteRef.current : [0]), 1);
-  // suggest a comfortable max (20% headroom)
-  diskOptions.scales.y.suggestedMax = Math.ceil(maxVal * 1.2);
+  const diskScale = getRecentScale(
+    [...getScaleWindow(ioReadRef.current), ...getScaleWindow(ioWriteRef.current)],
+    { minAtZero: true, minRange: 1 }
+  );
+  diskOptions.scales.y.min = diskScale.min;
+  diskOptions.scales.y.max = Math.ceil(diskScale.max);
 
   // format ticks as KB/s/MB/s
   diskOptions.scales.y.ticks.callback = function (v: any) {
