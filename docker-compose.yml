@@ -5,6 +5,7 @@ services:
       - "3000"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - /srv:/srv:ro
     pid: host
     privileged: true
     group_add:

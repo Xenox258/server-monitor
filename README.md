@@ -71,6 +71,7 @@ services:
       - "3000"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - /srv:/srv:ro
     pid: host
     privileged: true
     group_add:
@@ -124,6 +125,7 @@ Install the self-hosted runner on the Raspberry Pi or on the target host that ha
 Notes and tips
 - The frontend calls `/api/stats` with a relative URL. If you use an external nginx reverse proxy, route `/api/` to the backend service and route the rest to the frontend service.
 - The backend uses `pid: host` so the process leaderboards include host processes, not only the monitor container itself.
+- The backend mounts `/srv` read-only so disks mounted there, including NAS volumes, are visible in the logical disks list.
 - If you want the frontend to be served by the backend in production, you can build the frontend and copy the `dist/` output into `backend/static/` during CI or your Dockerfile build stages. That way the Rust server can serve the static files directly.
 - The backend currently enables a permissive CORS layer to make local development with Vite easy. For production, restrict origins appropriately.
 - When running the backend inside Docker and mounting `/var/run/docker.sock`, be aware this grants the container access to the host Docker daemon (security implications).
