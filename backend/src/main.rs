@@ -431,6 +431,10 @@ async fn get_stats(State(state): State<AppState>) -> Json<Stats> {
     let mut process_group_pids: HashMap<String, Vec<String>> = HashMap::new();
 
     for (pid, process) in sys.processes() {
+        if process.thread_kind().is_some() {
+            continue;
+        }
+
         let name = process.name().to_string_lossy().to_string();
         let pid = pid.to_string();
         let entry = process_groups.entry(name.clone()).or_insert(ProcessStat {
@@ -441,7 +445,7 @@ async fn get_stats(State(state): State<AppState>) -> Json<Stats> {
         });
 
         entry.cpu_usage += process.cpu_usage() / cpu_core_count;
-        entry.memory = entry.memory.saturating_add(process.memory());
+        entry.memory = entry.memory.max(process.memory());
         process_group_pids.entry(name).or_default().push(pid);
     }
 
@@ -523,6 +527,10 @@ async fn get_stats(State(state): State<AppState>) -> Json<Stats> {
     let previous_process_totals = state.process_io_totals.read().await.clone();
 
     for (pid, process) in sys.processes() {
+        if process.thread_kind().is_some() {
+            continue;
+        }
+
         let usage = process.disk_usage();
         let pid = pid.to_string();
         let name = process.name().to_string_lossy().to_string();
