@@ -216,6 +216,53 @@ fn compact_pid_list(pids: &[String]) -> String {
     }
 }
 
+fn is_virtual_filesystem(file_system: &str) -> bool {
+    matches!(
+        file_system,
+        "aufs"
+            | "autofs"
+            | "cgroup"
+            | "cgroup2"
+            | "debugfs"
+            | "devpts"
+            | "devtmpfs"
+            | "fusectl"
+            | "mqueue"
+            | "nsfs"
+            | "overlay"
+            | "proc"
+            | "pstore"
+            | "securityfs"
+            | "sysfs"
+            | "tmpfs"
+            | "tracefs"
+    )
+}
+
+fn disk_label_score(name: &str, mount_point: &str) -> u8 {
+    if name.starts_with("/dev/disk/by-uuid/") || mount_point.contains("/dev-disk-by-uuid-") {
+        3
+    } else if name.starts_with("/dev/") {
+        2
+    } else if mount_point == "/" {
+        1
+    } else {
+        0
+    }
+}
+
+fn prefer_disk_label(
+    current: &DiskStat,
+    candidate_name: &str,
+    candidate_mount_point: &str,
+) -> bool {
+    let current_score = disk_label_score(&current.name, "");
+    let candidate_score = disk_label_score(candidate_name, candidate_mount_point);
+
+    candidate_score > current_score
+        || (candidate_score == current_score && candidate_name.len() > current.name.len())
+}
+
 // Background task that periodically queries the Docker daemon for a list
 // of containers. The task updates `state.docker_containers` with a simple
 // summary. For now CPU/memory percentages are placeholders (0.0) — this
@@ -313,24 +360,75 @@ async fn get_stats(State(state): State<AppState>) -> Json<Stats> {
     let used_memory = sys.used_memory();
     let memory_percent = percent_u64(used_memory, total_memory);
 
-    let disks: Vec<DiskStat> = Disks::new_with_refreshed_list()
-        .list()
-        .iter()
-        .map(|disk| {
-            let total_space = disk.total_space();
-            let available_space = disk.available_space();
-            let used_space = total_space.saturating_sub(available_space);
-            let used_percent = percent_u64(used_space, total_space);
+    let mut disks_by_space: HashMap<(u64, u64), DiskStat> = HashMap::new();
 
-            DiskStat {
-                name: disk.name().to_string_lossy().to_string(),
-                total_space,
-                available_space,
-                used_space,
-                used_percent,
+    for disk in Disks::new_with_refreshed_list().list() {
+        let file_system = disk.file_system().to_string_lossy().to_string();
+        if is_virtual_filesystem(&file_system) {
+            continue;
+        }
+
+        let total_space = disk.total_space();
+        if total_space == 0 {
+            continue;
+        }
+
+        let available_space = disk.available_space();
+        let used_space = total_space.saturating_sub(available_space);
+        let used_percent = percent_u64(used_space, total_space);
+        let name = disk.name().to_string_lossy().to_string();
+        let mount_point = disk.mount_point().to_string_lossy().to_string();
+        let candidate = DiskStat {
+            name: name.clone(),
+            total_space,
+            available_space,
+            used_space,
+            used_percent,
+        };
+
+        let key = (total_space, used_space);
+        match disks_by_space.get_mut(&key) {
+            Some(existing) if prefer_disk_label(existing, &name, &mount_point) => {
+                *existing = candidate;
             }
-        })
-        .collect();
+            Some(_) => {}
+            None => {
+                disks_by_space.insert(key, candidate);
+            }
+        }
+    }
+
+    let mut disks: Vec<DiskStat> = disks_by_space.into_values().collect();
+    disks.sort_by(|a, b| {
+        b.total_space
+            .cmp(&a.total_space)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+
+    if disks.is_empty() {
+        disks = Disks::new_with_refreshed_list()
+            .list()
+            .iter()
+            .filter_map(|disk| {
+                let total_space = disk.total_space();
+                if total_space == 0 {
+                    return None;
+                }
+
+                let available_space = disk.available_space();
+                let used_space = total_space.saturating_sub(available_space);
+                let used_percent = percent_u64(used_space, total_space);
+
+                Some(DiskStat {
+                    name: disk.name().to_string_lossy().to_string(),
+                    total_space,
+                    available_space,
+                    used_space,
+                    used_percent,
+                })
+            })
+            .collect();
+    }
 
     let total_disk_space: u64 = disks.iter().map(|d| d.total_space).sum();
     let total_used_disk_space: u64 = disks.iter().map(|d| d.used_space).sum();
