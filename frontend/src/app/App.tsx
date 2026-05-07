@@ -241,6 +241,9 @@ export default function App() {
         legend: { display: false },
         tooltip: { enabled: true, mode: 'index', intersect: false },
       },
+      layout: {
+        padding: { top: 8 },
+      },
       scales: {
         x: {
           display: true,
@@ -330,8 +333,8 @@ export default function App() {
 const cpuLabels = stats.history.cpu.map((_, i) => String(i + 1));
 const ramLabels = stats.history.ram.map((_, i) => String(i + 1));
 
-const cpuScale = getRecentScale(stats.history.cpu, { minAtZero: true, minRange: 8, maxCap: 100, topPaddingRatio: 0.35 });
-const ramScale = getRecentScale(stats.history.ram, { minRange: 8, maxCap: 100, topPaddingRatio: 0.35 });
+const cpuScale = getRecentScale(stats.history.cpu, { minAtZero: true, minRange: 8, maxCap: 110, topPaddingRatio: 0.5 });
+const ramScale = getRecentScale(stats.history.ram, { minRange: 8, maxCap: 110, topPaddingRatio: 0.5 });
 
 cpuChart.current = makeChart(cpuChartRef, "#5eead4", stats.history.cpu, cpuLabels, "%", cpuScale);
 ramChart.current = makeChart(ramChartRef, "#60a5fa", stats.history.ram, ramLabels, "%", ramScale);
