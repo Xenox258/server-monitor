@@ -1,35 +1,16 @@
 services:
   backend:
-    build:
-      context: ./backend
-    image: server-monitor-backend:latest
-    container_name: server-monitor-backend
-    restart: no
+    build: ./backend
     expose:
       - "3000"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-    privileged: true
-    group_add:
-      - "984"
     networks:
       - server-monitor-network
 
   frontend:
-    build:
-      context: ./frontend
-    image: server-monitor-frontend:latest
-    container_name: server-monitor-frontend
-    restart: unless-stopped
-    expose:
-      - "80"
+    build: ./frontend
     ports:
       - "3011:80"
     depends_on:
       - backend
     networks:
       - server-monitor-network
-
-networks:
-  server-monitor-network:
-    driver: bridge

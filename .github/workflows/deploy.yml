@@ -4,6 +4,10 @@ on:
   push:
     branches: [main]
 
+concurrency:
+  group: server-monitor-deploy
+  cancel-in-progress: true
+
 jobs:
   deploy:
     runs-on: self-hosted
@@ -13,7 +17,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Build and restart Docker stack
-        run: docker compose up --build -d
+        run: docker compose up -d --build --remove-orphans
 
       - name: Prune old Docker images
         run: docker image prune -f
