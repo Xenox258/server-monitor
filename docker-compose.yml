@@ -3,6 +3,11 @@ services:
     build: ./backend
     expose:
       - "3000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    privileged: true
+    group_add:
+      - "984"
     networks:
       - server-monitor-network
 
