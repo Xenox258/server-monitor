@@ -136,6 +136,7 @@ struct ProcessIoStat {
 // to JSON for the frontend.
 #[derive(Serialize)]
 struct Stats {
+    host_name: String,
     total_memory: u64,
     used_memory: u64,
     memory_percent: f64,
@@ -685,6 +686,7 @@ async fn get_stats(State(state): State<AppState>) -> Json<Stats> {
     });
     top_processes_io.truncate(TOP_PROCESS_LEN);
     Json(Stats {
+        host_name: System::host_name().unwrap_or_else(|| "machine inconnue".to_string()),
         total_memory,
         used_memory,
         memory_percent,

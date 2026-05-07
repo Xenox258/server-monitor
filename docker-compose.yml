@@ -7,6 +7,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - /srv:/srv:ro
     pid: host
+    uts: host
     privileged: true
     group_add:
       - "984"

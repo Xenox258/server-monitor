@@ -17,6 +17,7 @@ import {
 import Chart from "chart.js/auto";
 
 type Stats = {
+  host_name: string;
   total_memory: number;
   used_memory: number;
   memory_percent: number;
@@ -409,7 +410,7 @@ if (diskChartRef.current) {
               Server Monitor
             </h1>
             <p className="mt-1 text-sm text-slate-400">
-              Dashboard système local — mise à jour automatique toutes les 2 secondes
+              Dashboard {stats?.host_name ?? "système local"} — mise à jour automatique toutes les 2 secondes
             </p>
           </div>
           <div className="text-xs font-semibold uppercase tracking-widest text-slate-500">
