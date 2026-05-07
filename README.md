@@ -57,29 +57,44 @@ docker run -it --rm -p 5173:5173 server-monitor-frontend:latest
 ```
 
 ## Docker Compose (recommended)
-The repository includes a `docker-compose.yml` that builds both services from the local `backend/` and `frontend/` folders. The frontend nginx container exposes the dashboard on port `5173` and proxies `/api/*` to the backend container.
+The repository includes a `docker-compose.yml` that builds both services from the local `backend/` and `frontend/` folders. The frontend nginx container exposes the dashboard on port `3011` and proxies `/api/*` to the backend container.
 
 ```yaml
 services:
   backend:
     build:
       context: ./backend
-    image: rpi-monitor-backend:latest
-    container_name: rpi-monitor-backend
+    image: server-monitor-backend:latest
+    container_name: server-monitor-backend
+    restart: no
+    expose:
+      - "3000"
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-    restart: unless-stopped
+      - /var/run/docker.sock:/var/run/docker.sock
+    privileged: true
+    group_add:
+      - "984"
+    networks:
+      - server-monitor-network
 
   frontend:
     build:
       context: ./frontend
-    image: rpi-monitor-frontend:latest
-    container_name: rpi-monitor-frontend
+    image: server-monitor-frontend:latest
+    container_name: server-monitor-frontend
+    restart: unless-stopped
+    expose:
+      - "80"
     ports:
-      - "5173:80"
+      - "3011:80"
     depends_on:
       - backend
-    restart: unless-stopped
+    networks:
+      - server-monitor-network
+
+networks:
+  server-monitor-network:
+    driver: bridge
 ```
 
 Start the stack:
