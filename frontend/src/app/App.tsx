@@ -149,7 +149,13 @@ function getScaleWindow(values: number[]) {
 
 function getRecentScale(
   values: number[],
-  options?: { minAtZero?: boolean; minRange?: number; maxCap?: number; useFullValues?: boolean }
+  options?: {
+    minAtZero?: boolean;
+    minRange?: number;
+    maxCap?: number;
+    topPaddingRatio?: number;
+    useFullValues?: boolean;
+  }
 ) {
   const scaleValues = options?.useFullValues ? values : getScaleWindow(values);
   const recentValues = scaleValues.filter((value) => Number.isFinite(value));
@@ -161,10 +167,12 @@ function getRecentScale(
   const rawMax = Math.max(...recentValues);
   const minRange = options?.minRange ?? 1;
   const range = Math.max(rawMax - rawMin, minRange);
-  const padding = Math.max(range * 0.2, minRange * 0.2);
+  const topPaddingRatio = options?.topPaddingRatio ?? 0.25;
+  const bottomPadding = Math.max(range * 0.2, minRange * 0.2);
+  const topPadding = Math.max(range * topPaddingRatio, minRange * topPaddingRatio);
 
-  let min = options?.minAtZero ? 0 : Math.max(0, rawMin - padding);
-  let max = rawMax + padding;
+  let min = options?.minAtZero ? 0 : Math.max(0, rawMin - bottomPadding);
+  let max = rawMax + topPadding;
 
   if (max - min < minRange) {
     max = min + minRange;
@@ -321,8 +329,8 @@ export default function App() {
 const cpuLabels = stats.history.cpu.map((_, i) => String(i + 1));
 const ramLabels = stats.history.ram.map((_, i) => String(i + 1));
 
-const cpuScale = getRecentScale(stats.history.cpu, { minAtZero: true, minRange: 8, maxCap: 100 });
-const ramScale = getRecentScale(stats.history.ram, { minRange: 8, maxCap: 100 });
+const cpuScale = getRecentScale(stats.history.cpu, { minAtZero: true, minRange: 8, maxCap: 100, topPaddingRatio: 0.35 });
+const ramScale = getRecentScale(stats.history.ram, { minRange: 8, maxCap: 100, topPaddingRatio: 0.35 });
 
 cpuChart.current = makeChart(cpuChartRef, "#5eead4", stats.history.cpu, cpuLabels, "%", cpuScale);
 ramChart.current = makeChart(ramChartRef, "#60a5fa", stats.history.ram, ramLabels, "%", ramScale);
@@ -342,16 +350,16 @@ if (diskChartRef.current) {
 
   const diskScale = getRecentScale(
     [...getScaleWindow(ioReadRef.current), ...getScaleWindow(ioWriteRef.current)],
-    { minAtZero: true, minRange: 1, useFullValues: true }
+    { minAtZero: true, minRange: 1, topPaddingRatio: 0.35, useFullValues: true }
   );
   diskOptions.scales.y.min = diskScale.min;
-  diskOptions.scales.y.max = Math.ceil(diskScale.max * 1.1);
+  diskOptions.scales.y.max = diskScale.max;
 
   // format ticks as KB/s/MB/s
   diskOptions.scales.y.ticks.callback = function (v: any) {
     const n = Number(v || 0);
-    if (n >= 1024) return `${(n / 1024).toFixed(1)} MB/s`;
-    return `${n.toFixed(0)} KB/s`;
+    if (n >= 1024) return `${Math.round(n / 1024)} MB/s`;
+    return `${Math.round(n)} KB/s`;
   };
 
   diskChart.current = new Chart(diskChartRef.current, {
