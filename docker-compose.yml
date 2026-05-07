@@ -14,3 +14,7 @@ services:
       - backend
     networks:
       - server-monitor-network
+
+networks:
+  server-monitor-network:
+    driver: bridge
