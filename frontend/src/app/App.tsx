@@ -147,8 +147,12 @@ function getScaleWindow(values: number[]) {
   return values.slice(-SCALE_WINDOW_LEN);
 }
 
-function getRecentScale(values: number[], options?: { minAtZero?: boolean; minRange?: number; maxCap?: number }) {
-  const recentValues = getScaleWindow(values).filter((value) => Number.isFinite(value));
+function getRecentScale(
+  values: number[],
+  options?: { minAtZero?: boolean; minRange?: number; maxCap?: number; useFullValues?: boolean }
+) {
+  const scaleValues = options?.useFullValues ? values : getScaleWindow(values);
+  const recentValues = scaleValues.filter((value) => Number.isFinite(value));
   if (recentValues.length === 0) {
     return { min: options?.minAtZero ? 0 : undefined, max: options?.minRange ?? 1 };
   }
@@ -170,7 +174,7 @@ function getRecentScale(values: number[], options?: { minAtZero?: boolean; minRa
     max = Math.min(max, options.maxCap);
   }
 
-  return { min, max };
+  return { min: Math.floor(min), max: Math.ceil(max) };
 }
 
 export default function App() {
@@ -274,7 +278,7 @@ export default function App() {
           ...((commonOptions.scales && (commonOptions.scales as any).y && (commonOptions.scales as any).y.ticks) || {}),
           callback: unit
             ? function (value: any) {
-                return `${value}${unit}`;
+                return `${Number(value).toFixed(0)}${unit}`;
               }
             : undefined,
         },
@@ -338,10 +342,10 @@ if (diskChartRef.current) {
 
   const diskScale = getRecentScale(
     [...getScaleWindow(ioReadRef.current), ...getScaleWindow(ioWriteRef.current)],
-    { minAtZero: true, minRange: 1 }
+    { minAtZero: true, minRange: 1, useFullValues: true }
   );
   diskOptions.scales.y.min = diskScale.min;
-  diskOptions.scales.y.max = Math.ceil(diskScale.max);
+  diskOptions.scales.y.max = Math.ceil(diskScale.max * 1.1);
 
   // format ticks as KB/s/MB/s
   diskOptions.scales.y.ticks.callback = function (v: any) {
