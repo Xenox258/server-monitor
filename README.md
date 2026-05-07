@@ -55,29 +55,26 @@ docker run -it --rm -p 5173:5173 server-monitor-frontend:latest
 ```
 
 ## Docker Compose (recommended)
-Below is a minimal `docker-compose.yml` example you can place at the repository root. It builds both services from the local `backend/` and `frontend/` folders and exposes ports for development.
+The repository includes a `docker-compose.yml` that builds both services from the local `backend/` and `frontend/` folders. The frontend nginx container exposes the dashboard on port `5173` and proxies `/api/*` to the backend container.
 
 ```yaml
-version: "3.8"
 services:
   backend:
-    build: ./backend
-    image: server-monitor-backend:latest
-    ports:
-      - "3000:3000"
+    build:
+      context: ./backend
+    image: rpi-monitor-backend:latest
+    container_name: rpi-monitor-backend
     volumes:
-      # optional: allow backend to inspect host docker if you want docker monitoring
       - /var/run/docker.sock:/var/run/docker.sock:ro
     restart: unless-stopped
 
   frontend:
-    build: ./frontend
-    image: server-monitor-frontend:latest
+    build:
+      context: ./frontend
+    image: rpi-monitor-frontend:latest
+    container_name: rpi-monitor-frontend
     ports:
-      - "5173:5173"
-    environment:
-      # If your frontend needs to contact a different API URL, set it here
-      # API_URL: http://backend:3000
+      - "5173:80"
     depends_on:
       - backend
     restart: unless-stopped
@@ -95,6 +92,16 @@ docker compose logs -f
 # stop
 docker compose down
 ```
+
+## GitHub Actions deployment
+The workflow in `.github/workflows/deploy.yml` deploys on every push to `main` using a self-hosted runner:
+
+```bash
+docker compose up --build -d
+docker image prune -f
+```
+
+Install the self-hosted runner on the Raspberry Pi or on the target host that has Docker access. The runner user must be allowed to run Docker commands and read `/var/run/docker.sock`.
 
 Notes and tips
 - If you want the frontend to be served by the backend in production, you can build the frontend and copy the `dist/` output into `backend/static/` during CI or your Dockerfile build stages. That way the Rust server can serve the static files directly.

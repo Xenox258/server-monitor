@@ -913,21 +913,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rpi_monitor"
-version = "0.1.0"
-dependencies = [
- "axum",
- "bollard",
- "futures",
- "reqwest",
- "serde",
- "serde_json",
- "sysinfo",
- "tokio",
- "tower-http",
-]
-
-[[package]]
 name = "rustc-hash"
 version = "2.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1061,6 +1046,21 @@ dependencies = [
  "itoa",
  "ryu",
  "serde",
+]
+
+[[package]]
+name = "server_monitor"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "bollard",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "tokio",
+ "tower-http",
 ]
 
 [[package]]

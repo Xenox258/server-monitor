@@ -6,14 +6,15 @@
 // check Internet connectivity and (optionally) refresh Docker container
 // metadata. Shared application state is stored in an `AppState` and
 // synchronized with async RwLocks.
-use axum::{extract::State, routing::get, Json, Router};
-use bollard::query_parameters::ListContainersOptions;
+use axum::{Json, Router, extract::State, routing::get};
 use bollard::Docker;
+use bollard::query_parameters::ListContainersOptions;
 use reqwest::Client;
 use serde::Serialize;
 use std::{
+    collections::HashMap,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use sysinfo::{Components, Disks, Networks, System};
 use tokio::sync::RwLock;
@@ -42,8 +43,18 @@ struct AppState {
     ram_history: Arc<RwLock<Vec<f64>>>,
     disk_history: Arc<RwLock<Vec<f64>>>,
     networks: Arc<RwLock<Networks>>,
+    disks_io: Arc<RwLock<Disks>>,
+    disk_io_last_refresh: Arc<RwLock<Option<Instant>>>,
+    process_io_totals: Arc<RwLock<HashMap<String, IoCounters>>>,
+    process_io_last_refresh: Arc<RwLock<Option<Instant>>>,
     docker: Docker,
     docker_containers: Arc<RwLock<Vec<ContainerStat>>>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct IoCounters {
+    read_bytes: u64,
+    write_bytes: u64,
 }
 
 // Time series history payload sent to the frontend. Each vector contains up
@@ -180,6 +191,27 @@ fn push_history(history: &mut Vec<f64>, value: f64) {
     history.push(value);
     if history.len() > HISTORY_LEN {
         history.remove(0);
+    }
+}
+
+fn bytes_per_second(bytes: u64, elapsed: Option<Duration>) -> u64 {
+    let Some(elapsed) = elapsed else {
+        return 0;
+    };
+
+    let seconds = elapsed.as_secs_f64();
+    if seconds > 0.0 {
+        (bytes as f64 / seconds).round() as u64
+    } else {
+        0
+    }
+}
+
+fn compact_pid_list(pids: &[String]) -> String {
+    match pids {
+        [] => String::new(),
+        [pid] => pid.clone(),
+        [first, rest @ ..] => format!("{first} + {}", rest.len()),
     }
 }
 
@@ -394,14 +426,31 @@ async fn get_stats(State(state): State<AppState>) -> Json<Stats> {
     let _process_count = sys.processes().len();
     let cpu_core_count = sys.cpus().len().max(1) as f32;
 
-    let processes: Vec<ProcessStat> = sys
-        .processes()
-        .iter()
-        .map(|(pid, process)| ProcessStat {
-            pid: pid.to_string(),
-            name: process.name().to_string_lossy().to_string(),
-            cpu_usage: process.cpu_usage() / cpu_core_count,
-            memory: process.memory(),
+    let mut process_groups: HashMap<String, ProcessStat> = HashMap::new();
+    let mut process_group_pids: HashMap<String, Vec<String>> = HashMap::new();
+
+    for (pid, process) in sys.processes() {
+        let name = process.name().to_string_lossy().to_string();
+        let pid = pid.to_string();
+        let entry = process_groups.entry(name.clone()).or_insert(ProcessStat {
+            pid: String::new(),
+            name: name.clone(),
+            cpu_usage: 0.0,
+            memory: 0,
+        });
+
+        entry.cpu_usage += process.cpu_usage() / cpu_core_count;
+        entry.memory = entry.memory.saturating_add(process.memory());
+        process_group_pids.entry(name).or_default().push(pid);
+    }
+
+    let mut processes: Vec<ProcessStat> = process_groups
+        .into_values()
+        .map(|mut process| {
+            if let Some(pids) = process_group_pids.get(&process.name) {
+                process.pid = compact_pid_list(pids);
+            }
+            process
         })
         .collect();
 
@@ -413,7 +462,7 @@ async fn get_stats(State(state): State<AppState>) -> Json<Stats> {
     });
     top_processes_cpu.truncate(5);
 
-    let mut top_processes_memory = processes;
+    let mut top_processes_memory = std::mem::take(&mut processes);
     top_processes_memory.sort_by(|a, b| b.memory.cmp(&a.memory));
     top_processes_memory.truncate(5);
 
@@ -431,26 +480,94 @@ async fn get_stats(State(state): State<AppState>) -> Json<Stats> {
     };
     let docker_containers = state.docker_containers.read().await.clone();
 
-    // compute per-process I/O and an aggregated I/O summary
-    let mut total_read_bytes = 0u64;
-    let mut total_write_bytes = 0u64;
+    // compute disk I/O rates from counters kept across requests
+    let disk_io_summary = {
+        let now = Instant::now();
+        let elapsed = {
+            let mut last_refresh = state.disk_io_last_refresh.write().await;
+            let elapsed = last_refresh.map(|last| now.saturating_duration_since(last));
+            *last_refresh = Some(now);
+            elapsed
+        };
 
-    let mut top_processes_io: Vec<ProcessIoStat> = sys
-        .processes()
-        .iter()
-        .map(|(pid, process)| {
-            let usage = process.disk_usage();
-            total_read_bytes += usage.read_bytes;
-            total_write_bytes += usage.written_bytes;
+        let mut disks_guard = state.disks_io.write().await;
+        disks_guard.refresh(true);
 
-            ProcessIoStat {
-                pid: pid.to_string(),
-                name: process.name().to_string_lossy().to_string(),
-                // divide by 2 to approximate per-second values based on the
-                // frontend polling interval (2s)
-                read_bytes: usage.read_bytes / 2,
-                write_bytes: usage.written_bytes / 2,
+        let mut total_read_bytes = 0u64;
+        let mut total_write_bytes = 0u64;
+
+        for disk in disks_guard.list() {
+            let usage = disk.usage();
+            total_read_bytes = total_read_bytes.saturating_add(usage.read_bytes);
+            total_write_bytes = total_write_bytes.saturating_add(usage.written_bytes);
+        }
+
+        DiskIoSummary {
+            read_bytes: bytes_per_second(total_read_bytes, elapsed),
+            write_bytes: bytes_per_second(total_write_bytes, elapsed),
+        }
+    };
+
+    let process_elapsed = {
+        let now = Instant::now();
+        let mut last_refresh = state.process_io_last_refresh.write().await;
+        let elapsed = last_refresh.map(|last| now.saturating_duration_since(last));
+        *last_refresh = Some(now);
+        elapsed
+    };
+
+    let mut current_process_totals = HashMap::new();
+    let mut io_groups: HashMap<String, ProcessIoStat> = HashMap::new();
+    let mut io_group_pids: HashMap<String, Vec<String>> = HashMap::new();
+    let previous_process_totals = state.process_io_totals.read().await.clone();
+
+    for (pid, process) in sys.processes() {
+        let usage = process.disk_usage();
+        let pid = pid.to_string();
+        let name = process.name().to_string_lossy().to_string();
+        let current = IoCounters {
+            read_bytes: usage.total_read_bytes,
+            write_bytes: usage.total_written_bytes,
+        };
+        current_process_totals.insert(pid.clone(), current);
+
+        let previous = previous_process_totals
+            .get(&pid)
+            .copied()
+            .unwrap_or(current);
+        let read_bytes = bytes_per_second(
+            current.read_bytes.saturating_sub(previous.read_bytes),
+            process_elapsed,
+        );
+        let write_bytes = bytes_per_second(
+            current.write_bytes.saturating_sub(previous.write_bytes),
+            process_elapsed,
+        );
+
+        if read_bytes == 0 && write_bytes == 0 {
+            continue;
+        }
+
+        let entry = io_groups.entry(name.clone()).or_insert(ProcessIoStat {
+            pid: String::new(),
+            name: name.clone(),
+            read_bytes: 0,
+            write_bytes: 0,
+        });
+        entry.read_bytes = entry.read_bytes.saturating_add(read_bytes);
+        entry.write_bytes = entry.write_bytes.saturating_add(write_bytes);
+        io_group_pids.entry(name).or_default().push(pid);
+    }
+
+    *state.process_io_totals.write().await = current_process_totals;
+
+    let mut top_processes_io: Vec<ProcessIoStat> = io_groups
+        .into_values()
+        .map(|mut process| {
+            if let Some(pids) = io_group_pids.get(&process.name) {
+                process.pid = compact_pid_list(pids);
             }
+            process
         })
         .collect();
 
@@ -460,11 +577,6 @@ async fn get_stats(State(state): State<AppState>) -> Json<Stats> {
         b_total.cmp(&a_total)
     });
     top_processes_io.truncate(5);
-
-    let disk_io_summary = DiskIoSummary {
-        read_bytes: total_read_bytes / 2,
-        write_bytes: total_write_bytes / 2,
-    };
     Json(Stats {
         total_memory,
         used_memory,
@@ -476,9 +588,9 @@ async fn get_stats(State(state): State<AppState>) -> Json<Stats> {
         uptime: System::uptime(),
         disk_percent,
         connection_status,
-    internet_access,
-    last_internet_check,
-    last_update: now,
+        internet_access,
+        last_internet_check,
+        last_update: now,
         disks,
         networks,
         temperatures,
@@ -503,6 +615,10 @@ async fn main() {
         ram_history: Arc::new(RwLock::new(Vec::new())),
         disk_history: Arc::new(RwLock::new(Vec::new())),
         networks: Arc::new(RwLock::new(Networks::new_with_refreshed_list())),
+        disks_io: Arc::new(RwLock::new(Disks::new_with_refreshed_list())),
+        disk_io_last_refresh: Arc::new(RwLock::new(None)),
+        process_io_totals: Arc::new(RwLock::new(HashMap::new())),
+        process_io_last_refresh: Arc::new(RwLock::new(None)),
         docker,
         docker_containers: Arc::new(RwLock::new(Vec::new())),
     };
@@ -521,9 +637,7 @@ async fn main() {
                 .allow_origin(Any),
         );
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000")
-        .await
-        .unwrap();
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
 
     axum::serve(listener, app).await.unwrap();
 }

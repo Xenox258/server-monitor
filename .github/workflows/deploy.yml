@@ -1,0 +1,19 @@
+name: Deploy RPi Monitor
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build and restart Docker stack
+        run: docker compose up --build -d
+
+      - name: Prune old Docker images
+        run: docker image prune -f

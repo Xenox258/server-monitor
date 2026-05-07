@@ -155,7 +155,7 @@ export default function App() {
   const cpuChart = useRef<Chart | null>(null);
   const ramChart = useRef<Chart | null>(null);
   const diskChart = useRef<Chart | null>(null);
-  // Local history for disk I/O (read/write) — frontend-side to avoid changing backend
+  // Local history for disk I/O rates (read/write).
   const IO_HISTORY_LEN = 60;
   const ioReadRef = useRef<number[]>([]);
   const ioWriteRef = useRef<number[]>([]);
@@ -284,16 +284,15 @@ const ramLabels = stats.history.ram.map((_, i) => String(i + 1));
 cpuChart.current = makeChart(cpuChartRef, "#5eead4", stats.history.cpu, cpuLabels, "%");
 ramChart.current = makeChart(ramChartRef, "#60a5fa", stats.history.ram, ramLabels, "%");
 
-// Update IO histories (convert bytes to KB/s-ish for display)
+// Update IO histories (backend values are bytes per second; chart uses KB/s)
   const readB = stats.disk_io_summary.read_bytes || 0;
   const writeB = stats.disk_io_summary.write_bytes || 0;
-  // push scaled values (KB)
   pushHistoryValue(ioReadRef.current, readB / 1024, IO_HISTORY_LEN);
   pushHistoryValue(ioWriteRef.current, writeB / 1024, IO_HISTORY_LEN);
 
 const ioLabels = ioReadRef.current.map((_, i) => String(i + 1));
 
-// create dual-line chart for disk I/O with dynamic Y scale and KB/MB ticks
+// create dual-line chart for disk I/O with dynamic Y scale and KB/s/MB/s ticks
 if (diskChartRef.current) {
   // clone commonOptions deeply to mutate safely
   const diskOptions: any = JSON.parse(JSON.stringify(commonOptions));
@@ -303,11 +302,11 @@ if (diskChartRef.current) {
   // suggest a comfortable max (20% headroom)
   diskOptions.scales.y.suggestedMax = Math.ceil(maxVal * 1.2);
 
-  // format ticks as KB/MB
+  // format ticks as KB/s/MB/s
   diskOptions.scales.y.ticks.callback = function (v: any) {
     const n = Number(v || 0);
-    if (n >= 1024) return `${(n / 1024).toFixed(1)} MB`;
-    return `${n.toFixed(0)} KB`;
+    if (n >= 1024) return `${(n / 1024).toFixed(1)} MB/s`;
+    return `${n.toFixed(0)} KB/s`;
   };
 
   diskChart.current = new Chart(diskChartRef.current, {
@@ -542,13 +541,13 @@ if (diskChartRef.current) {
                 <div className="flex flex-col">
                   <span className="text-xs font-semibold uppercase text-slate-500">Lecture</span>
                   <span className="mt-1 text-2xl font-bold tracking-tight text-white">
-                    {stats ? formatBytes(stats.disk_io_summary.read_bytes) : "--"}
+                    {stats ? formatSpeed(stats.disk_io_summary.read_bytes) : "--"}
                   </span>
                 </div>
                 <div className="flex flex-col">
                   <span className="text-xs font-semibold uppercase text-slate-500">Écriture</span>
                   <span className="mt-1 text-2xl font-bold tracking-tight text-white">
-                    {stats ? formatBytes(stats.disk_io_summary.write_bytes) : "--"}
+                    {stats ? formatSpeed(stats.disk_io_summary.write_bytes) : "--"}
                   </span>
                 </div>
               </div>
@@ -611,11 +610,11 @@ if (diskChartRef.current) {
                       <div className="flex items-center justify-between">
                         <strong className="text-slate-200">{proc.name}</strong>
                         <span className="font-mono text-sm text-orange-400">
-                          {formatBytes(proc.read_bytes + proc.write_bytes)}
+                          {formatSpeed(proc.read_bytes + proc.write_bytes)}
                         </span>
                       </div>
                       <div className="text-xs text-slate-500">
-                        Lecture: {formatBytes(proc.read_bytes)} · Écriture: {formatBytes(proc.write_bytes)}
+                        Lecture: {formatSpeed(proc.read_bytes)} · Écriture: {formatSpeed(proc.write_bytes)}
                       </div>
                     </div>
                   ))
