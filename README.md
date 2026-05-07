@@ -57,7 +57,7 @@ docker run -it --rm -p 5173:5173 server-monitor-frontend:latest
 ```
 
 ## Docker Compose (recommended)
-The repository includes a `docker-compose.yml` that builds both services from the local `backend/` and `frontend/` folders. The frontend nginx container exposes the dashboard on port `3011` and proxies `/api/*` to the backend container.
+The repository includes a `docker-compose.yml` that builds both services from the local `backend/` and `frontend/` folders. The frontend nginx container exposes the dashboard on port `3011`.
 
 ```yaml
 services:
@@ -121,6 +121,7 @@ docker image prune -f
 Install the self-hosted runner on the Raspberry Pi or on the target host that has Docker access. The runner user must be allowed to run Docker commands and read `/var/run/docker.sock`.
 
 Notes and tips
+- The frontend calls `/api/stats` with a relative URL. If you use an external nginx reverse proxy, route `/api/` to the backend service and route the rest to the frontend service.
 - If you want the frontend to be served by the backend in production, you can build the frontend and copy the `dist/` output into `backend/static/` during CI or your Dockerfile build stages. That way the Rust server can serve the static files directly.
 - The backend currently enables a permissive CORS layer to make local development with Vite easy. For production, restrict origins appropriately.
 - When running the backend inside Docker and mounting `/var/run/docker.sock`, be aware this grants the container access to the host Docker daemon (security implications).
