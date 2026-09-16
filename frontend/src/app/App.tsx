@@ -13,6 +13,8 @@ import {
   Server,
   Network,
   Fan,
+  AlertTriangle,
+  CheckCircle2,
 } from "lucide-react";
 import Chart from "chart.js/auto";
 
@@ -25,6 +27,11 @@ type Stats = {
   used_swap: number;
   cpu_count: number;
   cpu_usage: number;
+  cpu_cores: {
+    index: number;
+    name: string;
+    usage: number;
+  }[];
   uptime: number;
   disk_percent: number;
   connection_status: string;
@@ -78,6 +85,24 @@ type Stats = {
     read_bytes: number;
     write_bytes: number;
   }[];
+};
+
+type Summary = {
+  availability: string;
+  trackingSince: string;
+  latency: string;
+  latencyMs: number;
+  incidents: number;
+  incidentsLast24h: number;
+  totalIncidents: number;
+  unloggedIncidents: number;
+  incidentLog: {
+    kind: string;
+    startedAt: number;
+    endedAt: number | null;
+    durationSeconds: number;
+  }[];
+  updatedAt: string;
 };
 
 function formatPercent(value: number | null | undefined) {
@@ -134,6 +159,36 @@ function formatSpeed(bytesPerSecond: number) {
   return `${(n / (1024 * 1024 * 1024)).toFixed(1)} GB/s`;
 }
 
+function formatDuration(seconds: number) {
+  const totalSeconds = Math.max(0, Math.round(seconds || 0));
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const secs = totalSeconds % 60;
+
+  if (days > 0) return `${days} j ${hours} h`;
+  if (hours > 0) return `${hours} h ${minutes} min`;
+  if (minutes > 0) return `${minutes} min ${secs} s`;
+  return `${secs} s`;
+}
+
+function formatIncidentDate(unixSeconds: number) {
+  return new Date(unixSeconds * 1000).toLocaleString("fr-FR", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
+function incidentLabel(kind: string) {
+  if (kind === "internet_unavailable") return "Connexion Internet indisponible";
+  if (kind === "monitor_unavailable") return "Moniteur indisponible";
+  return "Incident système";
+}
+
 function normalizeContainerStatus(status: string) {
   const value = (status || "").toLowerCase();
   if (value.includes("running")) return { label: "Running", className: "running" };
@@ -188,6 +243,8 @@ function getRecentScale(
 
 export default function App() {
   const [stats, setStats] = useState<Stats | null>(null);
+  const [summary, setSummary] = useState<Summary | null>(null);
+  const [summaryError, setSummaryError] = useState<string>("");
   const [error, setError] = useState<string>("");
   // small ticking state to force re-render every 2s so relative/derived
   // timestamps (e.g. "il y a N s" or formatted last update) refresh
@@ -221,6 +278,23 @@ export default function App() {
 
     load();
     const id = window.setInterval(load, 2000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    const loadSummary = async () => {
+      try {
+        const res = await fetch("/api/summary");
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        setSummary((await res.json()) as Summary);
+        setSummaryError("");
+      } catch (e: any) {
+        setSummaryError(e?.message || "Erreur de chargement du journal");
+      }
+    };
+
+    loadSummary();
+    const id = window.setInterval(loadSummary, 30000);
     return () => window.clearInterval(id);
   }, []);
 
@@ -438,7 +512,9 @@ if (diskChartRef.current) {
                 <div className="text-3xl font-bold tracking-tight text-white">
                   {stats ? formatPercent(stats.cpu_usage) : "--"}
                 </div>
-                <div className="mt-1 text-sm text-slate-500">Usage global processeur</div>
+                <div className="mt-1 text-sm text-slate-500">
+                  {stats ? `Moyenne sur ${stats.cpu_count} cœurs logiques` : "Usage global processeur"}
+                </div>
               </div>
               <div className="mt-auto pt-4">
                 <div className="h-2 w-full overflow-hidden rounded-full border border-slate-800/50 bg-slate-950/50">
@@ -517,6 +593,115 @@ if (diskChartRef.current) {
               </div>
             </div>
           </div>
+
+          <section className="rounded-2xl border border-slate-800/60 bg-slate-900/50 p-5">
+            <div className="mb-4 flex items-center justify-between gap-4 border-b border-slate-800/60 pb-4">
+              <div className="flex items-center gap-2">
+                <Cpu className="h-5 w-5 text-teal-400" />
+                <div>
+                  <h2 className="text-sm font-bold uppercase tracking-wider text-white">Charge par cœur</h2>
+                  <p className="text-xs text-slate-500">Mesure instantanée de chaque cœur logique</p>
+                </div>
+              </div>
+              <span className="rounded-full border border-teal-500/20 bg-teal-500/10 px-3 py-1 text-xs font-semibold text-teal-300">
+                {stats?.cpu_cores?.length ?? 0} cœurs
+              </span>
+            </div>
+
+            {stats?.cpu_cores?.length ? (
+              <div className="custom-scrollbar grid max-h-72 grid-cols-1 gap-3 overflow-y-auto pr-2 sm:grid-cols-2 lg:grid-cols-4">
+                {stats.cpu_cores.map((core) => (
+                  <div key={core.index} className="rounded-xl border border-slate-800/40 bg-slate-950/40 p-3">
+                    <div className="mb-2 flex items-center justify-between gap-3">
+                      <span className="text-xs font-semibold text-slate-300">Cœur {core.index + 1}</span>
+                      <span className="font-mono text-xs text-teal-300">{formatPercent(core.usage)}</span>
+                    </div>
+                    <div className="h-1.5 overflow-hidden rounded-full bg-slate-800">
+                      <div
+                        className="h-full rounded-full bg-gradient-to-r from-teal-500 to-teal-300 transition-[width] duration-500"
+                        style={{ width: `${Math.min(100, Math.max(0, core.usage))}%` }}
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="text-sm text-slate-500">Détail par cœur en attente de la première mesure.</div>
+            )}
+          </section>
+
+          <section className="rounded-2xl border border-slate-800/60 bg-slate-900/50 p-5">
+            <div className="mb-4 flex flex-col gap-3 border-b border-slate-800/60 pb-4 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="h-5 w-5 text-amber-400" />
+                <div>
+                  <h2 className="text-sm font-bold uppercase tracking-wider text-white">Journal des incidents</h2>
+                  <p className="text-xs text-slate-500">Coupures du moniteur et de la connexion Internet</p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="rounded-full border border-amber-500/20 bg-amber-500/10 px-3 py-1 text-xs font-semibold text-amber-300">
+                  {summary?.incidentsLast24h ?? summary?.incidents ?? 0} sur 24 h
+                </span>
+                {summary ? (
+                  <span className="rounded-full border border-slate-700 bg-slate-800/70 px-3 py-1 text-xs text-slate-400">
+                    Disponibilité {summary.availability}
+                  </span>
+                ) : null}
+              </div>
+            </div>
+
+            {summaryError ? (
+              <div className="rounded-xl border border-rose-500/20 bg-rose-500/10 p-3 text-sm text-rose-200">
+                Journal indisponible : {summaryError}
+              </div>
+            ) : null}
+
+            {summary?.incidentLog?.length ? (
+              <div className="custom-scrollbar max-h-96 space-y-2 overflow-y-auto pr-2">
+                {summary.incidentLog.map((incident) => {
+                  const isOpen = incident.endedAt === null;
+                  return (
+                    <div
+                      key={`${incident.kind}-${incident.startedAt}`}
+                      className="flex flex-col gap-3 rounded-xl border border-slate-800/40 bg-slate-950/40 p-3 sm:flex-row sm:items-center sm:justify-between"
+                    >
+                      <div className="flex items-start gap-3">
+                        {isOpen ? (
+                          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-rose-400" />
+                        ) : (
+                          <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />
+                        )}
+                        <div>
+                          <div className="text-sm font-semibold text-slate-200">{incidentLabel(incident.kind)}</div>
+                          <div className="mt-0.5 text-xs text-slate-500">
+                            Début : {formatIncidentDate(incident.startedAt)}
+                            {incident.endedAt ? ` · Fin : ${formatIncidentDate(incident.endedAt)}` : ""}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 pl-7 sm:pl-0">
+                        <span className="font-mono text-xs text-slate-300">{formatDuration(incident.durationSeconds)}</span>
+                        <span
+                          className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase ${
+                            isOpen
+                              ? "border-rose-500/20 bg-rose-500/10 text-rose-300"
+                              : "border-emerald-500/20 bg-emerald-500/10 text-emerald-300"
+                          }`}
+                        >
+                          {isOpen ? "En cours" : "Résolu"}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : summary && !summaryError ? (
+              <div className="flex items-center gap-2 rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-4 text-sm text-emerald-200">
+                <CheckCircle2 className="h-4 w-4" /> Aucun incident détaillé enregistré.
+              </div>
+            ) : null}
+          </section>
 
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-6 xl:gap-6">
             <div className="flex flex-col gap-1 rounded-2xl border border-slate-800/60 bg-slate-900/50 p-5 backdrop-blur-sm lg:col-span-2">

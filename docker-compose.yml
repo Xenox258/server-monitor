@@ -1,11 +1,14 @@
 services:
   backend:
     build: ./backend
+    restart: unless-stopped
     expose:
       - "3000"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - /srv:/srv:ro
+      - /srv/dev-disk-by-uuid-bc4bf586-0ba1-432b-8d70-9e62440759b9/NAS/data:/var/lib/nextcloud-data:ro
+      - /srv/dev-disk-by-uuid-0818de14-ddf8-46a5-bf71-2ecaff879f70/server-monitor-state:/var/lib/server-monitor
     pid: host
     uts: host
     privileged: true
@@ -16,6 +19,7 @@ services:
 
   frontend:
     build: ./frontend
+    restart: unless-stopped
     ports:
       - "3011:80"
     depends_on:

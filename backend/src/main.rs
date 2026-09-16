@@ -6,23 +6,33 @@
 // check Internet connectivity and (optionally) refresh Docker container
 // metadata. Shared application state is stored in an `AppState` and
 // synchronized with async RwLocks.
-use axum::{Json, Router, extract::State, routing::get};
+use axum::{Json, Router, extract::State, http::StatusCode, routing::get};
 use bollard::Docker;
 use bollard::query_parameters::ListContainersOptions;
 use reqwest::Client;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use sysinfo::{Components, Disks, Networks, System};
+use tokio::process::Command;
 use tokio::sync::RwLock;
 use tokio::time::interval;
 use tower_http::cors::{Any, CorsLayer};
 
 const HISTORY_LEN: usize = 60;
 const TOP_PROCESS_LEN: usize = 3;
+const NEXTCLOUD_DATA_PATH: &str = "/var/lib/nextcloud-data";
+const SUMMARY_STATE_PATH: &str = "/var/lib/server-monitor/summary-state.json";
+const WIREGUARD_VPS_ADDRESS: &str = "10.0.0.1:22";
+const SUMMARY_SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
+const MONITOR_INCIDENT_THRESHOLD_SECONDS: u64 = 90;
+const INCIDENT_LOG_LIMIT: usize = 100;
+const INCIDENT_WINDOW_SECONDS: u64 = 24 * 60 * 60;
+const INCIDENT_KIND_MONITOR: &str = "monitor_unavailable";
+const INCIDENT_KIND_INTERNET: &str = "internet_unavailable";
 
 // Summary information for a Docker container used by the frontend.
 #[derive(Clone, Serialize)]
@@ -38,6 +48,7 @@ struct ContainerStat {
 // async reads and writes without blocking the runtime.
 #[derive(Clone)]
 struct AppState {
+    system: Arc<RwLock<System>>,
     internet_access: Arc<RwLock<bool>>,
     last_internet_check: Arc<RwLock<u64>>,
     cpu_history: Arc<RwLock<Vec<f64>>>,
@@ -50,6 +61,7 @@ struct AppState {
     process_io_last_refresh: Arc<RwLock<Option<Instant>>>,
     docker: Docker,
     docker_containers: Arc<RwLock<Vec<ContainerStat>>>,
+    summary: Arc<RwLock<SummaryState>>,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -75,6 +87,63 @@ struct DiskStat {
     available_space: u64,
     used_space: u64,
     used_percent: f64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NextcloudStorage {
+    free_bytes: u64,
+    total_bytes: u64,
+    used_bytes: u64,
+    percent: u64,
+}
+
+#[derive(Serialize)]
+struct ErrorResponse {
+    error: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Summary {
+    availability: String,
+    tracking_since: String,
+    latency: String,
+    latency_ms: u64,
+    incidents: u64,
+    incidents_last_24h: u64,
+    total_incidents: u64,
+    unlogged_incidents: u64,
+    incident_log: Vec<IncidentLog>,
+    updated_at: String,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct SummaryState {
+    first_seen: u64,
+    observed_seconds: u64,
+    available_seconds: u64,
+    incidents: u64,
+    last_seen: u64,
+    #[serde(default)]
+    incident_log: Vec<IncidentRecord>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IncidentRecord {
+    kind: String,
+    started_at: u64,
+    ended_at: Option<u64>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IncidentLog {
+    kind: String,
+    started_at: u64,
+    ended_at: Option<u64>,
+    duration_seconds: u64,
 }
 
 // Per-network interface counters.
@@ -106,6 +175,13 @@ struct ProcessStat {
     name: String,
     cpu_usage: f32,
     memory: u64,
+}
+
+#[derive(Serialize)]
+struct CpuCoreStat {
+    index: usize,
+    name: String,
+    usage: f32,
 }
 
 // Single value summary derived from available temperature sensors.
@@ -144,6 +220,7 @@ struct Stats {
     used_swap: u64,
     cpu_count: usize,
     cpu_usage: f32,
+    cpu_cores: Vec<CpuCoreStat>,
     uptime: u64,
     disk_percent: f64,
     connection_status: String,
@@ -207,6 +284,314 @@ fn bytes_per_second(bytes: u64, elapsed: Option<Duration>) -> u64 {
     } else {
         0
     }
+}
+
+fn storage_error(
+    status: StatusCode,
+    message: impl Into<String>,
+) -> (StatusCode, Json<ErrorResponse>) {
+    (status, Json(ErrorResponse { error: message.into() }))
+}
+
+fn unix_timestamp_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn utc_timestamp(seconds_since_epoch: u64) -> String {
+    let days_since_epoch = (seconds_since_epoch / 86_400) as i64;
+    let seconds_today = seconds_since_epoch % 86_400;
+
+    // Gregorian calendar conversion for days since 1970-01-01.
+    let shifted_days = days_since_epoch + 719_468;
+    let era = if shifted_days >= 0 {
+        shifted_days / 146_097
+    } else {
+        (shifted_days - 146_096) / 146_097
+    };
+    let day_of_era = shifted_days - era * 146_097;
+    let year_of_era = (day_of_era - day_of_era / 1_460 + day_of_era / 36_524
+        - day_of_era / 146_096)
+        / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_part = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_part + 2) / 5 + 1;
+    let month = month_part + if month_part < 10 { 3 } else { -9 };
+    let year = year + if month <= 2 { 1 } else { 0 };
+
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        seconds_today / 3_600,
+        (seconds_today % 3_600) / 60,
+        seconds_today % 60,
+    )
+}
+
+fn utc_timestamp_now() -> String {
+    utc_timestamp(unix_timestamp_now())
+}
+
+async fn save_summary_state(state: &SummaryState) {
+    let Ok(serialized) = serde_json::to_string(state) else {
+        return;
+    };
+
+    let temporary_path = format!("{SUMMARY_STATE_PATH}.tmp");
+    if tokio::fs::write(&temporary_path, serialized).await.is_ok() {
+        let _ = tokio::fs::rename(temporary_path, SUMMARY_STATE_PATH).await;
+    }
+}
+
+fn prune_incident_log(summary: &mut SummaryState) {
+    if summary.incident_log.len() > INCIDENT_LOG_LIMIT {
+        let excess = summary.incident_log.len() - INCIDENT_LOG_LIMIT;
+        summary.incident_log.drain(0..excess);
+    }
+}
+
+fn begin_incident(summary: &mut SummaryState, kind: &str, started_at: u64) {
+    if summary
+        .incident_log
+        .iter()
+        .any(|incident| incident.kind == kind && incident.ended_at.is_none())
+    {
+        return;
+    }
+
+    summary.incidents = summary.incidents.saturating_add(1);
+    summary.incident_log.push(IncidentRecord {
+        kind: kind.to_string(),
+        started_at,
+        ended_at: None,
+    });
+    prune_incident_log(summary);
+}
+
+fn resolve_incident(summary: &mut SummaryState, kind: &str, ended_at: u64) {
+    if let Some(incident) = summary
+        .incident_log
+        .iter_mut()
+        .rev()
+        .find(|incident| incident.kind == kind && incident.ended_at.is_none())
+    {
+        incident.ended_at = Some(ended_at.max(incident.started_at));
+    }
+}
+
+fn add_closed_incident(summary: &mut SummaryState, kind: &str, started_at: u64, ended_at: u64) {
+    summary.incidents = summary.incidents.saturating_add(1);
+    summary.incident_log.push(IncidentRecord {
+        kind: kind.to_string(),
+        started_at,
+        ended_at: Some(ended_at.max(started_at)),
+    });
+    prune_incident_log(summary);
+}
+
+async fn load_summary_state() -> SummaryState {
+    let now = unix_timestamp_now();
+    let _ = tokio::fs::create_dir_all("/var/lib/server-monitor").await;
+
+    let mut state = tokio::fs::read_to_string(SUMMARY_STATE_PATH)
+        .await
+        .ok()
+        .and_then(|contents| serde_json::from_str::<SummaryState>(&contents).ok())
+        .unwrap_or(SummaryState {
+            first_seen: now,
+            observed_seconds: 0,
+            available_seconds: 0,
+            incidents: 0,
+            last_seen: now,
+            incident_log: Vec::new(),
+        });
+
+    // The previous heartbeat is the last moment at which this backend was
+    // known to be alive. Only a gap longer than three expected heartbeats is
+    // logged as an incident, so normal quick restarts do not inflate the count.
+    if state.last_seen > 0 && now > state.last_seen {
+        let incident_started_at = state.last_seen;
+        let gap_seconds = now.saturating_sub(incident_started_at);
+        state.observed_seconds = state
+            .observed_seconds
+            .saturating_add(gap_seconds);
+
+        if gap_seconds >= MONITOR_INCIDENT_THRESHOLD_SECONDS {
+            add_closed_incident(
+                &mut state,
+                INCIDENT_KIND_MONITOR,
+                incident_started_at,
+                now,
+            );
+        }
+    }
+
+    state.last_seen = now;
+    save_summary_state(&state).await;
+    state
+}
+
+async fn summary_monitor_task(state: AppState) {
+    let mut ticker = interval(SUMMARY_SAMPLE_INTERVAL);
+
+    loop {
+        ticker.tick().await;
+
+        let now = unix_timestamp_now();
+        let mut summary = state.summary.write().await;
+        let elapsed = now.saturating_sub(summary.last_seen);
+        summary.observed_seconds = summary.observed_seconds.saturating_add(elapsed);
+        summary.available_seconds = summary.available_seconds.saturating_add(elapsed);
+        summary.last_seen = now;
+        save_summary_state(&summary).await;
+    }
+}
+
+async fn measure_wireguard_latency() -> Option<u64> {
+    let started = Instant::now();
+    let connection = tokio::time::timeout(
+        Duration::from_secs(2),
+        tokio::net::TcpStream::connect(WIREGUARD_VPS_ADDRESS),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    drop(connection);
+    Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64)
+}
+
+fn format_availability(summary: &SummaryState, now: u64) -> String {
+    let running_seconds = now.saturating_sub(summary.last_seen);
+    let observed_seconds = summary.observed_seconds.saturating_add(running_seconds);
+    let available_seconds = summary
+        .available_seconds
+        .saturating_add(running_seconds);
+    let percentage = if observed_seconds == 0 {
+        100.0
+    } else {
+        (available_seconds as f64 / observed_seconds as f64) * 100.0
+    };
+
+    format!("{percentage:.2}%").replace('.', ",")
+}
+
+fn incident_logs(summary: &SummaryState, now: u64) -> Vec<IncidentLog> {
+    summary
+        .incident_log
+        .iter()
+        .rev()
+        .map(|incident| {
+            let effective_end = incident.ended_at.unwrap_or(now).max(incident.started_at);
+            IncidentLog {
+                kind: incident.kind.clone(),
+                started_at: incident.started_at,
+                ended_at: incident.ended_at,
+                duration_seconds: effective_end.saturating_sub(incident.started_at),
+            }
+        })
+        .collect()
+}
+
+async fn get_summary(State(state): State<AppState>) -> Json<Summary> {
+    let now = unix_timestamp_now();
+    let summary_state = state.summary.read().await.clone();
+    let window_start = now.saturating_sub(INCIDENT_WINDOW_SECONDS);
+    let incidents_last_24h = summary_state
+        .incident_log
+        .iter()
+        .filter(|incident| incident.ended_at.unwrap_or(now) >= window_start)
+        .count() as u64;
+    let unlogged_incidents = summary_state
+        .incidents
+        .saturating_sub(summary_state.incident_log.len() as u64);
+    let latency_ms = measure_wireguard_latency().await;
+    let latency = latency_ms
+        .map(|milliseconds| format!("{milliseconds} ms"))
+        .unwrap_or_else(|| "N/A".to_string());
+
+    Json(Summary {
+        availability: format_availability(&summary_state, now),
+        tracking_since: utc_timestamp(summary_state.first_seen),
+        latency,
+        latency_ms: latency_ms.unwrap_or(0),
+        // Keep `incidents` as the rolling 24-hour value for older clients.
+        incidents: incidents_last_24h,
+        incidents_last_24h,
+        total_incidents: summary_state.incidents,
+        unlogged_incidents,
+        incident_log: incident_logs(&summary_state, now),
+        updated_at: utc_timestamp_now(),
+    })
+}
+
+async fn get_nextcloud_storage(
+) -> Result<Json<NextcloudStorage>, (StatusCode, Json<ErrorResponse>)> {
+    // `-P` keeps the output parseable and `-B1` requests byte precision.
+    // Keep these as separate arguments: `df -B1P` is interpreted by GNU df as
+    // a block size of "1P" and returns values scaled to pebibytes.
+    let output = Command::new("df")
+        .args(["-P", "-B1", NEXTCLOUD_DATA_PATH])
+        .output()
+        .await
+        .map_err(|error| {
+            storage_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("impossible d'exécuter df: {error}"),
+            )
+        })?;
+
+    if !output.status.success() {
+        let details = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let message = if details.is_empty() {
+            format!("df a échoué pour {NEXTCLOUD_DATA_PATH}")
+        } else {
+            format!("df a échoué pour {NEXTCLOUD_DATA_PATH}: {details}")
+        };
+        return Err(storage_error(StatusCode::SERVICE_UNAVAILABLE, message));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let fields: Vec<&str> = stdout
+        .lines()
+        .skip(1)
+        .find(|line| !line.trim().is_empty())
+        .ok_or_else(|| storage_error(StatusCode::BAD_GATEWAY, "sortie df vide"))?
+        .split_whitespace()
+        .collect();
+
+    if fields.len() < 5 {
+        return Err(storage_error(
+            StatusCode::BAD_GATEWAY,
+            "sortie df inattendue",
+        ));
+    }
+
+    let parse_field = |index: usize, label: &str| {
+        fields[index].parse::<u64>().map_err(|_| {
+            storage_error(
+                StatusCode::BAD_GATEWAY,
+                format!("valeur {label} invalide retournée par df"),
+            )
+        })
+    };
+
+    let total_bytes = parse_field(1, "totalBytes")?;
+    let used_bytes = parse_field(2, "usedBytes")?;
+    let free_bytes = parse_field(3, "freeBytes")?;
+    let percent = fields[4]
+        .strip_suffix('%')
+        .ok_or_else(|| storage_error(StatusCode::BAD_GATEWAY, "pourcentage df invalide"))?
+        .parse::<u64>()
+        .map_err(|_| storage_error(StatusCode::BAD_GATEWAY, "pourcentage df invalide"))?;
+
+    Ok(Json(NextcloudStorage {
+        free_bytes,
+        total_bytes,
+        used_bytes,
+        percent,
+    }))
 }
 
 fn compact_pid_list(pids: &[String]) -> String {
@@ -333,6 +718,21 @@ async fn internet_monitor_task(state: AppState) {
             .unwrap()
             .as_secs();
 
+        let previous_check = *state.last_internet_check.read().await;
+        let was_online = *state.internet_access.read().await;
+
+        {
+            let mut summary = state.summary.write().await;
+            if previous_check > 0 && !was_online && !is_online {
+                // Require two consecutive failed probes before opening an
+                // incident. A single transient HTTP failure is not an outage.
+                begin_incident(&mut summary, INCIDENT_KIND_INTERNET, previous_check);
+            } else if !was_online && is_online {
+                resolve_incident(&mut summary, INCIDENT_KIND_INTERNET, now);
+            }
+            save_summary_state(&summary).await;
+        }
+
         {
             let mut internet_access = state.internet_access.write().await;
             *internet_access = is_online;
@@ -353,9 +753,11 @@ async fn internet_monitor_task(state: AppState) {
 async fn get_stats(State(state): State<AppState>) -> Json<Stats> {
     use std::cmp::Ordering;
 
-    let mut sys = System::new_all();
+    // CPU usage is a delta between two refreshes. Keeping one System instance
+    // across requests gives sysinfo the required sampling interval and also
+    // makes process CPU figures meaningful.
+    let mut sys = state.system.write().await;
     sys.refresh_all();
-    sys.refresh_cpu_usage();
 
     let total_memory = sys.total_memory();
     let used_memory = sys.used_memory();
@@ -436,7 +838,25 @@ async fn get_stats(State(state): State<AppState>) -> Json<Stats> {
 
     let disk_percent = percent_u64(total_used_disk_space, total_disk_space);
 
-    let cpu_usage = sys.global_cpu_usage() as f64;
+    let cpu_cores: Vec<CpuCoreStat> = sys
+        .cpus()
+        .iter()
+        .enumerate()
+        .map(|(index, cpu)| CpuCoreStat {
+            index,
+            name: cpu.name().to_string(),
+            usage: cpu.cpu_usage(),
+        })
+        .collect();
+    let cpu_usage = if cpu_cores.is_empty() {
+        0.0
+    } else {
+        cpu_cores
+            .iter()
+            .map(|cpu| cpu.usage as f64)
+            .sum::<f64>()
+            / cpu_cores.len() as f64
+    };
 
     // update rolling histories used by the frontend charts
     {
@@ -692,8 +1112,9 @@ async fn get_stats(State(state): State<AppState>) -> Json<Stats> {
         memory_percent,
         total_swap: sys.total_swap(),
         used_swap: sys.used_swap(),
-        cpu_count: sys.cpus().len(),
+        cpu_count: cpu_cores.len(),
         cpu_usage: cpu_usage as f32,
+        cpu_cores,
         uptime: System::uptime(),
         disk_percent,
         connection_status,
@@ -717,7 +1138,9 @@ async fn get_stats(State(state): State<AppState>) -> Json<Stats> {
 #[tokio::main]
 async fn main() {
     let docker = Docker::connect_with_local_defaults().expect("Docker socket non trouvé");
+    let summary_state = load_summary_state().await;
     let state = AppState {
+        system: Arc::new(RwLock::new(System::new_all())),
         internet_access: Arc::new(RwLock::new(false)),
         last_internet_check: Arc::new(RwLock::new(0)),
         cpu_history: Arc::new(RwLock::new(Vec::new())),
@@ -730,13 +1153,17 @@ async fn main() {
         process_io_last_refresh: Arc::new(RwLock::new(None)),
         docker,
         docker_containers: Arc::new(RwLock::new(Vec::new())),
+        summary: Arc::new(RwLock::new(summary_state)),
     };
 
     tokio::spawn(internet_monitor_task(state.clone()));
     tokio::spawn(docker_monitor_task(state.clone()));
+    tokio::spawn(summary_monitor_task(state.clone()));
 
     let app = Router::new()
         .route("/api/stats", get(get_stats))
+        .route("/api/summary", get(get_summary))
+        .route("/api/nextcloud/storage", get(get_nextcloud_storage))
         .with_state(state)
         // Add a permissive CORS layer for local development (Vite dev server)
         .layer(
